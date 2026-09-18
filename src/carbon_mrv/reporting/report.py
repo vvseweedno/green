@@ -78,6 +78,23 @@ def _safe_data_uri(
     return uri
 
 
+def _best_quality_scene(quality: list[dict], stage: str) -> dict | None:
+    candidates = [
+        q for q in quality
+        if q.get("stage") == stage and q.get("reflectance_path")
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda q: float(
+            q.get("strict_valid_fraction")
+            if q.get("strict_valid_fraction") is not None
+            else q.get("valid_fraction") or 0.0
+        ),
+    )
+
+
 def _evidence_gallery(events: list[dict], dataset_root: Path | None, limit: int = 12) -> str:
     if not events:
         return "<p>No event image evidence available.</p>"
@@ -85,14 +102,8 @@ def _evidence_gallery(events: list[dict], dataset_root: Path | None, limit: int 
     blocks = []
     for event in events[:limit]:
         quality = event.get("data_quality") or []
-        before = next(
-            (q for q in quality if q.get("stage") == "before" and q.get("reflectance_path")),
-            None,
-        )
-        after = next(
-            (q for q in quality if q.get("stage") == "after" and q.get("reflectance_path")),
-            None,
-        )
+        before = _best_quality_scene(quality, "before")
+        after = _best_quality_scene(quality, "after")
         b_uri = _safe_data_uri(dataset_root, (before or {}).get("reflectance_path"), cache)
         a_uri = _safe_data_uri(dataset_root, (after or {}).get("reflectance_path"), cache)
         images = []
