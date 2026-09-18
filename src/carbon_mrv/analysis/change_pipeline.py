@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from datetime import date
 
 import numpy as np
+from rasterio.features import geometry_mask
+from shapely.geometry import mapping
 
 from carbon_mrv.change.composites import robust_annual_composite
 from carbon_mrv.change.fusion import Evidence, fuse_event
 from carbon_mrv.change.indices import scene_indices
 from carbon_mrv.change.objects import connected_objects
-from carbon_mrv.change.transitions import transition_maps
+from carbon_mrv.change.transitions import robust_z, transition_maps
 from carbon_mrv.geometry.reproject import reproject_geometry
 from carbon_mrv.quality.scl import scl_quality_summary, scl_valid_mask
 
@@ -90,6 +92,8 @@ def detect_transition(
         "loss_objects": loss_objects,
         "gain_objects": gain_objects,
         "quality": {"before": qa_before, "after": qa_after},
+        "before_composite": before,
+        "after_composite": after,
         "crs": before_scenes[0].crs,
     }
 
@@ -100,9 +104,15 @@ def sentinel_evidence(
     after_scenes: list[SceneObservation],
     *,
     direction: str,
+    post_date_override: date | None = None,
 ):
     last_pre = max(s.observed_on for s in before_scenes)
     first_post = min(s.observed_on for s in after_scenes)
+    if (
+        post_date_override is not None
+        and last_pre < post_date_override < first_post
+    ):
+        first_post = post_date_override
     geom_wgs84 = reproject_geometry(obj.geometry, before_scenes[0].crs, "EPSG:4326")
     evidence = Evidence(
         "sentinel2",
@@ -112,6 +122,87 @@ def sentinel_evidence(
         first_post,
     )
     return geom_wgs84, evidence
+
+
+def diagnostic_post_signal(
+    obj,
+    before_composite: dict[str, np.ndarray],
+    scene: SceneObservation,
+    *,
+    reference_transform,
+    reference_crs: str,
+    direction: str,
+    z_threshold: float = 2.5,
+    min_index_agreement: int = 2,
+    min_event_valid_fraction: float = 0.5,
+) -> dict:
+    """Use a non-composite scene only to tighten event timing when evidence is strong.
+
+    The scene is never inserted into the annual median composite. It must align with the
+    detector grid, cover at least the configured fraction of event pixels, and reproduce
+    the disturbance/recovery direction in at least two indices.
+    """
+    result = {
+        "date": scene.observed_on.isoformat(),
+        "supports_post_change": False,
+        "used_for_annual_composite": False,
+        "reason": None,
+    }
+    if scene.crs != reference_crs or tuple(scene.transform) != tuple(reference_transform):
+        result["reason"] = "diagnostic_scene_grid_mismatch"
+        return result
+    shape0 = before_composite["NBR"].shape
+    if next(iter(scene.bands.values())).shape != shape0:
+        result["reason"] = "diagnostic_scene_shape_mismatch"
+        return result
+
+    object_mask = geometry_mask(
+        [mapping(obj.geometry)],
+        out_shape=shape0,
+        transform=scene.transform,
+        invert=True,
+    )
+    n_object = int(np.sum(object_mask))
+    if n_object == 0:
+        result["reason"] = "event_has_no_pixels_on_diagnostic_grid"
+        return result
+
+    valid = scl_valid_mask(scene.scl, allow_low_confidence=True)
+    selected_valid = object_mask & valid
+    valid_fraction = float(np.sum(selected_valid) / n_object)
+    result["event_valid_fraction"] = valid_fraction
+    result["scene_quality"] = scl_quality_summary(scene.scl)
+    if valid_fraction < min_event_valid_fraction:
+        result["reason"] = "insufficient_valid_event_observations"
+        return result
+
+    diagnostics = scene_indices(scene.bands)
+    scores: dict[str, float | None] = {}
+    votes = 0
+    for name in ("NBR", "NDVI", "NDMI"):
+        delta = np.asarray(before_composite[name], dtype=float) - np.asarray(
+            diagnostics[name], dtype=float
+        )
+        z = robust_z(delta)
+        pixels = z[selected_valid & np.isfinite(z)]
+        median_z = float(np.nanmedian(pixels)) if pixels.size else None
+        scores[name] = median_z
+        if median_z is None:
+            continue
+        if direction == "disturbance" and median_z >= z_threshold:
+            votes += 1
+        if direction == "recovery" and median_z <= -z_threshold:
+            votes += 1
+
+    result["median_robust_z"] = scores
+    result["index_agreement"] = votes
+    result["supports_post_change"] = votes >= min_index_agreement
+    result["reason"] = (
+        "multi_index_post_change_support"
+        if result["supports_post_change"]
+        else "insufficient_multi_index_agreement"
+    )
+    return result
 
 
 def fused_event_record(
