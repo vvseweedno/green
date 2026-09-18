@@ -59,10 +59,22 @@ function fitGeometry(map:MLMap,geometry:any){
   map.fitBounds([[minX,minY],[maxX,maxY]],{padding:48,maxZoom:14,duration:0});
 }
 
-function VerifierMap({geometry,events}:{geometry:any;events:EventRecord[]}){
+function draftGeoJSON(points:[number,number][]){
+  if(points.length===0)return {type:'FeatureCollection',features:[]};
+  const geometry=points.length>=3
+    ?{type:'Polygon',coordinates:[[...points,points[0]]]}
+    :points.length===2
+      ?{type:'LineString',coordinates:points}
+      :{type:'Point',coordinates:points[0]};
+  return {type:'Feature',properties:{draft:true},geometry};
+}
+
+function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:EventRecord[];onGeometryDrawn:(g:any)=>void}){
   const el=useRef<HTMLDivElement>(null);
   const mapRef=useRef<MLMap|null>(null);
   const [showAoi,setShowAoi]=useState(true),[showEvents,setShowEvents]=useState(true);
+  const [drawMode,setDrawMode]=useState(false);
+  const [drawPoints,setDrawPoints]=useState<[number,number][]>([]);
   const eventsFc=useMemo(()=>({
     type:'FeatureCollection',
     features:(events||[]).filter(e=>e.geometry).map(e=>({
@@ -83,6 +95,9 @@ function VerifierMap({geometry,events}:{geometry:any;events:EventRecord[]}){
       map.addSource('events',{type:'geojson',data:eventsFc as any});
       map.addLayer({id:'event-fill',type:'fill',source:'events',paint:{'fill-color':['match',['get','direction'],'disturbance','#cf4a2c','recovery','#3182bd','#777'],'fill-opacity':0.36}});
       map.addLayer({id:'event-line',type:'line',source:'events',paint:{'line-color':'#222','line-width':1.5}});
+      map.addSource('draft',{type:'geojson',data:draftGeoJSON([]) as any});
+      map.addLayer({id:'draft-fill',type:'fill',source:'draft',paint:{'fill-color':'#e69f00','fill-opacity':0.18}});
+      map.addLayer({id:'draft-line',type:'line',source:'draft',paint:{'line-color':'#b66b00','line-width':3,'line-dasharray':[2,1]}});
       fitGeometry(map,geometry);
     });
     return()=>{map.remove();mapRef.current=null};
@@ -109,10 +124,43 @@ function VerifierMap({geometry,events}:{geometry:any;events:EventRecord[]}){
     for(const id of ['event-fill','event-line'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',showEvents?'visible':'none');
   },[showEvents]);
 
+  useEffect(()=>{
+    const map=mapRef.current;if(!map)return;
+    const click=(event:any)=>{
+      if(!drawMode)return;
+      const point:[number,number]=[event.lngLat.lng,event.lngLat.lat];
+      setDrawPoints(prev=>{
+        const next=[...prev,point];
+        (map.getSource('draft') as any)?.setData(draftGeoJSON(next));
+        return next;
+      });
+    };
+    map.getCanvas().style.cursor=drawMode?'crosshair':'';
+    map.on('click',click);
+    return()=>{map.off('click',click);map.getCanvas().style.cursor='';};
+  },[drawMode]);
+
+  function clearDraft(){
+    setDrawPoints([]);
+    const map=mapRef.current;
+    if(map?.isStyleLoaded())(map.getSource('draft') as any)?.setData(draftGeoJSON([]));
+  }
+
+  function finishDraft(){
+    if(drawPoints.length<3)return;
+    const polygon={type:'Polygon',coordinates:[[...drawPoints,drawPoints[0]]]};
+    onGeometryDrawn(polygon);
+    setDrawMode(false);
+    clearDraft();
+  }
+
   return <div className="map-wrap">
     <div className="map-toolbar">
       <label><input type="checkbox" checked={showAoi} onChange={e=>setShowAoi(e.target.checked)}/> AOI</label>
       <label><input type="checkbox" checked={showEvents} onChange={e=>setShowEvents(e.target.checked)}/> change objects</label>
+      <button type="button" className={drawMode?'active':''} onClick={()=>setDrawMode(v=>!v)}>{drawMode?'Drawing…':'Draw AOI'}</button>
+      {drawMode&&<button type="button" disabled={drawPoints.length<3} onClick={finishDraft}>Finish</button>}
+      {drawPoints.length>0&&<button type="button" onClick={clearDraft}>Clear</button>}
       <span>offline map</span>
     </div>
     <div className="map" ref={el}/>
@@ -173,8 +221,11 @@ export default function App(){
   const stock=result?.stock,credits=result?.credits,unc=result?.uncertainty;
   const events=result?.events||[];
   const selected=events.find(e=>e.event_id===selectedEventId)||events[0];
-  const before=selected?.data_quality?.find(q=>q.stage==='before'&&q.reflectance_path);
-  const after=selected?.data_quality?.find(q=>q.stage==='after'&&q.reflectance_path);
+  const bestScene=(stage:string)=>selected?.data_quality
+    ?.filter(q=>q.stage===stage&&q.reflectance_path)
+    .sort((a,b)=>(b.strict_valid_fraction??b.valid_fraction??0)-(a.strict_valid_fraction??a.valid_fraction??0))[0];
+  const before=bestScene('before');
+  const after=bestScene('after');
 
   return <main>
     <header><div><p className="eyebrow">Verification-first MRV</p><h1>Satellite Carbon MRV</h1><p>CCI carbon stock + explainable change evidence + correlated uncertainty + auditable potential-unit calculation.</p></div><div className="badge">2019–2024</div></header>
@@ -191,7 +242,7 @@ export default function App(){
         <p className="hint">Q is withheld when full coverage, baseline or finite uncertainty inputs are unavailable. Evidence gaps reduce confidence instead of being inferred.</p>
       </aside>
       <section>
-        <VerifierMap geometry={geometry} events={events}/>
+        <VerifierMap geometry={geometry} events={events} onGeometryDrawn={g=>setGeometryText(JSON.stringify(g,null,2))}/>
         {result&&<>
           <div className="cards">
             <Metric label="E" value={`${stock?.E_tco2e?.toFixed(2)} tCO₂e`} sub="positive = stock loss"/>
