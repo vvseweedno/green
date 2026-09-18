@@ -10,6 +10,7 @@ import pandas as pd
 import rasterio
 
 from carbon_mrv.data.catalog import verify_file_catalog
+from carbon_mrv.data.external_evidence import find_raster
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.data.metadata import MANDATORY_METADATA_FILES, load_official_metadata
 from carbon_mrv.data.scene_index import load_scene_rows
@@ -132,12 +133,69 @@ def main() -> int:
                     errors.append(f"Prepared Sentinel reflectance scale must be 1: {row.reflectance_path}")
                 if any(abs(float(x)) > 1e-9 for x in refl.offsets[:6]):
                     errors.append(f"Prepared Sentinel reflectance offset must be 0: {row.reflectance_path}")
+                if not all(np.issubdtype(np.dtype(dtype), np.floating) for dtype in refl.dtypes[:6]):
+                    errors.append(f"Prepared Sentinel reflectance bands must be floating point: {row.reflectance_path}")
+                if not np.issubdtype(np.dtype(scl.dtypes[0]), np.integer):
+                    errors.append(f"Sentinel SCL must be integer-class raster: {row.scl_path}")
+        scene_counts: dict[tuple[str, int], int] = {}
+        for row in scene_rows:
+            if row.observed_at.month in {6, 7, 8}:
+                key=(row.aoi_id,row.observed_at.year)
+                scene_counts[key]=scene_counts.get(key,0)+1
+        for aoi_id in sorted(parent_ids):
+            for year in range(2019, 2025):
+                if scene_counts.get((aoi_id,year),0) < 2:
+                    errors.append(
+                        f"need >=2 summer Sentinel scenes for {aoi_id}/{year}; "
+                        f"found {scene_counts.get((aoi_id,year),0)}"
+                    )
+        for aoi_id in ("RU_MORDOVIA_03","RU_MORDOVIA_04"):
+            if aoi_id in parent_ids:
+                extra=[
+                    row for row in scene_rows
+                    if row.aoi_id==aoi_id
+                    and row.observed_at.year==2021
+                    and row.observed_at.month==9
+                    and row.observed_at.day==12
+                ]
+                if not extra:
+                    errors.append(f"missing required 2021-09-12 Sentinel scene for {aoi_id}")
+        metadata_missing=sum(1 for row in scene_rows if row.metadata is None)
+        evidence["scene_metadata_joined"] = len(scene_rows)-metadata_missing
+        if metadata_missing:
+            warnings.append(
+                f"scene_metadata.json could not be joined to {metadata_missing} scene row(s); "
+                "radiometry/version provenance will be incomplete"
+            )
     except Exception as exc:
         errors.append(f"scenes.csv/scene metadata validation failed: {exc}")
 
     cci_paths = sorted(root.rglob("CCI_Biomass_*.tif"))
     if not cci_paths:
         errors.append("no CCI_Biomass_*.tif files found")
+    cci_grid_reference: dict[str, tuple] = {}
+    for aoi_id in sorted(parent_ids):
+        for year in range(2015, 2025):
+            path=dataset.cci_path(aoi_id,year)
+            if path is None:
+                errors.append(f"missing CCI_Biomass_{year}.tif for {aoi_id}")
+                continue
+            try:
+                with rasterio.open(path) as src:
+                    signature=(str(src.crs),tuple(src.transform),src.width,src.height)
+                    if aoi_id not in cci_grid_reference:
+                        cci_grid_reference[aoi_id]=signature
+                    elif cci_grid_reference[aoi_id] != signature:
+                        errors.append(f"CCI annual grid mismatch for {aoi_id}/{year}: {path}")
+                    if not all(np.issubdtype(np.dtype(dtype), np.floating) for dtype in src.dtypes[:2]):
+                        errors.append(f"CCI AGB/SD bands must be floating point: {path}")
+                    if src.count >= 2:
+                        h=min(src.height,256);w=min(src.width,256)
+                        sd=np.asarray(src.read(2,out_shape=(h,w),masked=True).filled(np.nan),dtype=float)
+                        if np.any(sd[np.isfinite(sd)] < 0):
+                            errors.append(f"CCI AGB_SD contains negative values: {path}")
+            except Exception as exc:
+                errors.append(f"CCI completeness/grid check failed {path}: {exc}")
     for path in cci_paths:
         try:
             with rasterio.open(path) as src:
@@ -157,8 +215,35 @@ def main() -> int:
             with rasterio.open(path) as src:
                 if src.count < 3:
                     errors.append(f"CCI change raster needs delta/SD/flag bands: {path}")
+                else:
+                    h=min(src.height,256);w=min(src.width,256)
+                    sd=np.asarray(src.read(2,out_shape=(h,w),masked=True).filled(np.nan),dtype=float)
+                    if np.any(sd[np.isfinite(sd)] < 0):
+                        errors.append(f"CCI change SD contains negative values: {path}")
         except Exception as exc:
             errors.append(f"CCI change raster open failed {path}: {exc}")
+
+    required_gfc=("treecover2000","lossyear","datamask")
+    for aoi_id in sorted(parent_ids):
+        for product in required_gfc:
+            if find_raster(root,aoi_id,product) is None:
+                errors.append(f"missing GFC {product} raster for {aoi_id}")
+
+    for aoi_id in ("RU_MORDOVIA_03","RU_MORDOVIA_04"):
+        if aoi_id not in parent_ids:
+            continue
+        required_modis=(
+            ("burn","date"),
+            ("burn","uncert"),
+            ("qa",),
+            ("first","day"),
+            ("last","day"),
+        )
+        for keywords in required_modis:
+            if find_raster(root,aoi_id,*keywords,year=2021) is None:
+                errors.append(
+                    f"missing MODIS 2021 layer for {aoi_id}: {'+'.join(keywords)}"
+                )
 
     for path in root.rglob("*.tif"):
         low = path.name.lower()
@@ -171,6 +256,11 @@ def main() -> int:
                 if any(k in low for k in ("lossyear", "treecover2000", "datamask")):
                     if str(src.crs).upper() not in {"EPSG:4326", "OGC:CRS84"}:
                         errors.append(f"GFC raster must be EPSG:4326: {path}")
+                    if not np.issubdtype(np.dtype(src.dtypes[0]), np.integer):
+                        errors.append(f"GFC categorical raster must use integer dtype: {path}")
+                if any(k in low for k in ("burn_date", "qa", "first_day", "last_day")):
+                    if not np.issubdtype(np.dtype(src.dtypes[0]), np.integer):
+                        errors.append(f"MODIS categorical/time raster must use integer dtype: {path}")
         except Exception as exc:
             errors.append(f"raster open failed {path}: {exc}")
 
