@@ -1,7 +1,8 @@
 .PHONY: setup verify-data test research demo api frontend judge
 
 setup:
-	python -m pip install -e '.[dev]'
+	python -m pip install -r requirements.lock
+	python -m pip install -e . --no-deps
 
 verify-data:
 	python scripts/verify_dataset.py data/raw
