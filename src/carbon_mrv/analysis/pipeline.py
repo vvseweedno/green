@@ -12,6 +12,7 @@ from affine import Affine
 from carbon_mrv.analysis.change_pipeline import (
     SceneObservation,
     detect_transition,
+    diagnostic_post_signal,
     fused_event_record,
     sentinel_evidence,
 )
@@ -58,10 +59,19 @@ def _sum_stock(parts: list[StockEstimate]) -> StockEstimate:
     return StockEstimate(area, total, total / area)
 
 
-def _load_observations(scene_rows, aoi_id: str, year: int, geometry, dataset_root: Path) -> list[SceneObservation]:
+def _load_observations(
+    scene_rows,
+    aoi_id: str,
+    year: int,
+    geometry,
+    dataset_root: Path,
+    months: frozenset[int] = frozenset({6, 7, 8}),
+) -> list[SceneObservation]:
     rows = [
         r for r in scene_rows
-        if r.aoi_id == aoi_id and r.observed_at.year == year and r.observed_at.month in {6, 7, 8}
+        if r.aoi_id == aoi_id
+        and r.observed_at.year == year
+        and r.observed_at.month in months
     ]
     observations = []
     for row in sorted(rows, key=lambda r: r.observed_at):
@@ -318,6 +328,19 @@ def _build_events(
                 )
                 continue
 
+            diagnostic_obs = (
+                _load_observations(
+                    scene_rows,
+                    parent.aoi_id,
+                    year,
+                    part_geom,
+                    dataset.root,
+                    months=frozenset({9, 10}),
+                )
+                if request.data_mode != "online"
+                else []
+            )
+
             layers.append(
                 {
                     "id": f"sentinel-change-{parent.aoi_id}-{year}-{year+1}",
@@ -334,8 +357,44 @@ def _build_events(
                 ("recovery", detected["gain_objects"]),
             ):
                 for idx, obj in enumerate(objects, 1):
+                    diagnostic_quality = []
+                    supported_dates = []
+                    for diagnostic_scene in diagnostic_obs:
+                        diagnostic = diagnostic_post_signal(
+                            obj,
+                            detected["before_composite"],
+                            diagnostic_scene,
+                            reference_transform=before_obs[0].transform,
+                            reference_crs=before_obs[0].crs,
+                            direction=direction,
+                        )
+                        meta = diagnostic_scene.metadata or {}
+                        scene_quality = diagnostic.pop("scene_quality", {})
+                        diagnostic_quality.append({
+                            "stage": "diagnostic",
+                            "date": diagnostic_scene.observed_on.isoformat(),
+                            **scene_quality,
+                            **diagnostic,
+                            "scene_id": meta.get("scene_id") or meta.get("item_id"),
+                            "processing_baseline": meta.get("processing_baseline")
+                            or meta.get("s2:processing_baseline")
+                            or meta.get("processing:version"),
+                            "radiometry": meta.get("radiometry")
+                            or meta.get("scale_offset")
+                            or meta.get("bands"),
+                            "reflectance_path": meta.get("reflectance_path"),
+                            "scl_path": meta.get("scl_path"),
+                            "used_for_annual_composite": False,
+                        })
+                        if diagnostic.get("supports_post_change"):
+                            supported_dates.append(diagnostic_scene.observed_on)
+                    post_override = min(supported_dates) if supported_dates else None
                     geom_wgs84, s2_ev = sentinel_evidence(
-                        obj, before_obs, after_obs, direction=direction
+                        obj,
+                        before_obs,
+                        after_obs,
+                        direction=direction,
+                        post_date_override=post_override,
                     )
                     ev_objects = [s2_ev]
                     details = [
@@ -345,7 +404,14 @@ def _build_events(
                             "direction": s2_ev.direction,
                             "date_min": s2_ev.date_min.isoformat() if s2_ev.date_min else None,
                             "date_max": s2_ev.date_max.isoformat() if s2_ev.date_max else None,
-                            "note": "Robust annual NDVI/NBR/NDMI agreement",
+                            "note": (
+                                "Robust annual NDVI/NBR/NDMI agreement; "
+                                + (
+                                    "date_max tightened by diagnostic-only post-event scene."
+                                    if post_override
+                                    else "no diagnostic-only scene passed the post-change support rule."
+                                )
+                            ),
                         }
                     ]
 
@@ -453,7 +519,8 @@ def _build_events(
                             + [
                                 {"stage": "after", **q}
                                 for q in detected["quality"]["after"]
-                            ],
+                            ]
+                            + diagnostic_quality,
                             carbon_contribution=carbon,
                             limitations=event_limitations
                             + [
