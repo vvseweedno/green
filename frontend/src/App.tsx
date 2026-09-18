@@ -18,10 +18,11 @@ type AnalysisResult={
   run_id:string;
   coverage:{requested_area_ha:number;computed_area_ha:number;coverage_ratio:number;missing_area_ha:number};
   stock:{E_tco2e:number;e_tco2e_ha_year:number;delta_c_t:number;start:{total_carbon_t:number;mean_carbon_t_ha:number};end:{total_carbon_t:number;mean_carbon_t_ha:number};yearly:Array<{year:number;mean_carbon_t_ha:number;total_carbon_t:number;annual_delta_c_t?:number|null;annual_E_tco2e?:number|null;cumulative_delta_c_t?:number;cumulative_E_tco2e?:number}>};
-  uncertainty?:{L:number;U:number;method:string};
-  credits:{status:string;reason?:string;R?:number;H?:number;UNC?:number;Radj?:number;buffer?:number;Q?:number};
+  uncertainty?:{L:number;U:number;method:string;sensitivity?:Array<{scenario:string;status:string;L?:number;U?:number;interval_width_tco2e?:number;H?:number;H_over_R?:number;UNC?:number;Q?:number}>};
+  credits:{status:string;reason?:string;R?:number;H?:number;UNC?:number;Radj?:number;buffer?:number;Q?:number;scenario_values_rub?:Array<Record<string,unknown>>;price_scenario_disclaimer?:string};
   baseline?:{Ebase?:number};
   events?:EventRecord[];
+  provenance?:Record<string,unknown>;
   limitations?:string[];
   warnings?:string[];
 };
@@ -282,6 +283,11 @@ export default function App(){
             <div className="panel"><h2>Coverage</h2><div className="coverage"><strong>{(result.coverage.coverage_ratio*100).toFixed(2)}%</strong><span>{result.coverage.computed_area_ha.toFixed(2)} / {result.coverage.requested_area_ha.toFixed(2)} ha</span></div></div>
             <div className="panel"><h2>Credit waterfall</h2><pre>{JSON.stringify({Ebase:result.baseline?.Ebase,Eproj:stock?.E_tco2e,R:credits?.R,H:credits?.H,UNC:credits?.UNC,Radj:credits?.Radj,buffer:credits?.buffer,Q:credits?.Q,status:credits?.status,reason:credits?.reason},null,2)}</pre></div>
           </div>
+          <div className="panel sensitivity-panel"><h2>Uncertainty sensitivity</h2>
+            {unc?.sensitivity?.length?<table><thead><tr><th>Scenario</th><th>L</th><th>U</th><th>Width</th><th>H/R</th><th>UNC</th><th>Q</th></tr></thead><tbody>{unc.sensitivity.map(row=><tr key={row.scenario} className={row.scenario===scenario?'selected-row':''}><td>{row.scenario}</td><td>{row.L==null?'—':row.L.toFixed(1)}</td><td>{row.U==null?'—':row.U.toFixed(1)}</td><td>{row.interval_width_tco2e==null?'—':row.interval_width_tco2e.toFixed(1)}</td><td>{row.H_over_R==null?'—':row.H_over_R.toFixed(3)}</td><td>{row.UNC==null?'—':row.UNC.toFixed(3)}</td><td>{row.Q==null?'—':row.Q}</td></tr>)}</tbody></table>:<p className="hint">Sensitivity unavailable for this run.</p>}
+            <p className="hint">Model-based scenario comparison. The selected production scenario is highlighted; the system does not automatically choose the narrowest interval.</p>
+          </div>
+          <div className="panel"><h2>Price scenarios after Q</h2><pre>{JSON.stringify(credits?.scenario_values_rub||[],null,2)}</pre><p className="hint">{credits?.price_scenario_disclaimer}</p></div>
           <div className="panel"><h2>Annual carbon trajectory</h2><CarbonTimeline points={stock?.yearly||[]} uncertainty={unc}/><table><thead><tr><th>Year</th><th>Mean tC/ha</th><th>Total tC</th><th>Annual ΔC</th><th>Cumulative E</th></tr></thead><tbody>{stock?.yearly?.map(p=><tr key={p.year}><td>{p.year}</td><td>{p.mean_carbon_t_ha.toFixed(4)}</td><td>{p.total_carbon_t.toFixed(2)}</td><td>{p.annual_delta_c_t==null?'—':p.annual_delta_c_t.toFixed(2)}</td><td>{p.cumulative_E_tco2e==null?'—':p.cumulative_E_tco2e.toFixed(2)}</td></tr>)}</tbody></table></div>
           <div className="panel events-panel">
             <div className="panel-title"><h2>Change events</h2><span>{events.length} objects</span></div>
@@ -303,8 +309,9 @@ export default function App(){
               </>}
             </>}
           </div>
+          <div className="panel audit"><details><summary>Audit & provenance</summary><pre>{JSON.stringify(result.provenance||{},null,2)}</pre></details></div>
           <div className="panel warning"><b>Verification limits</b><ul>{(result.limitations||[]).map(x=><li key={x}>{x}</li>)}</ul></div>
-          <a className="report" href={`${api}/api/v1/analysis/${result.run_id}/report`} target="_blank" rel="noreferrer">Open audit report ↗</a>
+          <a className="report" href={`${api}/api/v1/analysis/${result.run_id}/report`} target="_blank" rel="noreferrer">Download verification report ↗</a>
         </>}
       </section>
     </section>
