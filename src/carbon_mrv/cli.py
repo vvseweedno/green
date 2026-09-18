@@ -24,7 +24,7 @@ def main():
         result = analyze_local(req, args.dataset)
         result["run_id"] = str(uuid4())
         result["created_at_utc"] = datetime.now(timezone.utc).isoformat()
-        html_path, json_path = write_report(result, args.runs)
+        html_path, json_path = write_report(result, args.runs, args.dataset)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         print(f"report={html_path} json={json_path}")
 
