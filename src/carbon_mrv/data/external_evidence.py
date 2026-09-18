@@ -181,6 +181,8 @@ def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, y
     feasible = low_pixels <= high_pixels
     if not np.any(feasible):
         return None
+    feasible_mask = np.zeros_like(valid, dtype=bool)
+    feasible_mask[valid] = feasible
 
     lo_day = int(np.min(low_pixels[feasible]))
     hi_day = int(np.max(high_pixels[feasible]))
@@ -204,7 +206,7 @@ def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, y
         "first_day_constraint_used": first is not None,
         "last_day_constraint_used": last is not None,
         "footprint_geometry_wgs84": _support_geometry_wgs84(
-            valid, burn_transform, burn_crs
-        ) if np.any(valid) else None,
+            feasible_mask, burn_transform, burn_crs
+        ) if np.any(feasible_mask) else None,
         "footprint_kind": "coarse MCD64A1 cell support; not exact burn perimeter",
     }
