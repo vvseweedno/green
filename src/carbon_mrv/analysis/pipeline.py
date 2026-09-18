@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
+import os
 from typing import Any
 
 import numpy as np
+from affine import Affine
 
 from carbon_mrv.analysis.change_pipeline import (
     SceneObservation,
@@ -24,6 +27,7 @@ from carbon_mrv.carbon.stock import (
     stock_from_weighted_pixels,
 )
 from carbon_mrv.change.fusion import Evidence
+from carbon_mrv.data.cache import ArrayCache
 from carbon_mrv.data.cci import area_weight_grid, exact_weight_vectors, read_cci_clip
 from carbon_mrv.data.cci_change import temporal_rho_from_official_change
 from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
@@ -32,6 +36,7 @@ from carbon_mrv.data.metadata import compact_metadata_provenance, load_official_
 from carbon_mrv.data.provenance import canonical_json_hash, sha256_file
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.data.sentinel2 import read_prepared_scene
+from carbon_mrv.data.stac import rank_candidates, read_scene, search_items
 from carbon_mrv.domain.models import AnalysisRequest
 from carbon_mrv.geometry.area import geodesic_area_ha
 from carbon_mrv.geometry.validate import validate_geometry_geojson, validate_years
@@ -86,6 +91,120 @@ def _load_observations(scene_rows, aoi_id: str, year: int, geometry, dataset_roo
             )
         )
     return observations
+
+
+def _observation_from_cached(arrays: dict, metadata: dict) -> SceneObservation:
+    transform_values = metadata.get("transform")
+    if not transform_values or not metadata.get("crs"):
+        raise ValueError("Cached Sentinel scene is missing transform/CRS metadata")
+    transform = Affine(*list(transform_values)[:6])
+    observed = metadata.get("datetime")
+    if not observed:
+        raise ValueError("Cached Sentinel scene is missing datetime")
+    observed_on = datetime.fromisoformat(str(observed).replace("Z", "+00:00")).date()
+    bands = {name: np.asarray(arrays[name]) for name in ("B02","B03","B04","B8A","B11","B12")}
+    scene_meta = {
+        **metadata,
+        "scene_id": metadata.get("item_id"),
+        "processing_baseline": metadata.get("processing_baseline"),
+        "radiometry": metadata.get("scale_offset"),
+        "artifact_sha256": metadata.get("sha256"),
+        "acquisition_mode": metadata.get("acquisition_mode", "cache"),
+    }
+    return SceneObservation(
+        observed_on,
+        bands,
+        np.asarray(arrays["SCL"], dtype=np.uint8),
+        transform,
+        str(metadata["crs"]),
+        scene_meta,
+    )
+
+
+def _stac_observations(
+    geometry,
+    year: int,
+    *,
+    mode: str,
+    warnings: list[str],
+    count: int = 2,
+) -> list[SceneObservation]:
+    start_date = f"{year}-06-01"
+    end_date = f"{year}-08-31"
+    geometry_json = geometry.__geo_interface__
+    request_hash = canonical_json_hash({
+        "geometry": geometry_json,
+        "start": start_date,
+        "end": end_date,
+    })
+    cache_root = Path(os.getenv("CARBON_MRV_CACHE", "data/cache/sentinel2"))
+    cache = ArrayCache(cache_root)
+
+    if mode in {"auto", "offline"}:
+        try:
+            replay = cache.replay_by_request_hash(request_hash)
+            if replay:
+                observations = [
+                    _observation_from_cached(arrays, {**meta, "acquisition_mode": "offline_cache"})
+                    for arrays, meta in replay[:count]
+                ]
+                return sorted(observations, key=lambda item: item.observed_on)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Sentinel cache replay failed for {year}: {exc}")
+        if mode == "offline":
+            return []
+
+    try:
+        items = search_items(geometry_json, start_date, end_date)
+        ranked = rank_candidates(items, geometry)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"Sentinel Earth Search query failed for {year}: {exc}")
+        return []
+
+    observations = []
+    for candidate in ranked[:count]:
+        try:
+            arrays, metadata = read_scene(candidate.item, geometry)
+            metadata["aoi_scl_quality"] = {
+                "valid_fraction": candidate.valid_fraction,
+                "strict_valid_fraction": candidate.strict_valid_fraction,
+                "low_confidence_fraction": candidate.low_confidence_fraction,
+            }
+            metadata["request_hash"] = request_hash
+            metadata["acquisition_mode"] = "online_stac"
+            saved = cache.put(candidate.item.id, arrays, metadata)
+            observations.append(_observation_from_cached(arrays, saved))
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"Sentinel online scene {getattr(candidate.item, 'id', '?')} failed: {exc}"
+            )
+    return sorted(observations, key=lambda item: item.observed_on)
+
+
+def _observations_for_mode(
+    scene_rows,
+    aoi_id: str,
+    year: int,
+    geometry,
+    dataset_root: Path,
+    *,
+    mode: str,
+    warnings: list[str],
+) -> list[SceneObservation]:
+    if mode != "online":
+        local = _load_observations(scene_rows, aoi_id, year, geometry, dataset_root)
+        if local:
+            return local
+    if mode == "offline":
+        return _stac_observations(
+            geometry, year, mode="offline", warnings=warnings
+        )
+    return _stac_observations(
+        geometry,
+        year,
+        mode="online" if mode == "online" else "auto",
+        warnings=warnings,
+    )
 
 
 def _evidence_from_dict(payload: dict) -> Evidence:
@@ -169,8 +288,24 @@ def _build_events(
             )
 
         for year in range(request.year_start, request.year_end):
-            before_obs = _load_observations(scene_rows, parent.aoi_id, year, part_geom, dataset.root)
-            after_obs = _load_observations(scene_rows, parent.aoi_id, year + 1, part_geom, dataset.root)
+            before_obs = _observations_for_mode(
+                scene_rows,
+                parent.aoi_id,
+                year,
+                part_geom,
+                dataset.root,
+                mode=request.data_mode,
+                warnings=warnings,
+            )
+            after_obs = _observations_for_mode(
+                scene_rows,
+                parent.aoi_id,
+                year + 1,
+                part_geom,
+                dataset.root,
+                mode=request.data_mode,
+                warnings=warnings,
+            )
             if not before_obs or not after_obs:
                 continue
             try:
