@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,3 +92,90 @@ class LocalDataset:
                     result[str(aoi)] = BaselineTrajectory(str(aoi), values[2015], values[2019])
             return result
         raise ValueError("baseline.csv schema unsupported")
+
+
+    def baseline_consistency_report(
+        self,
+        *,
+        rel_tol: float = 1e-6,
+        abs_tol: float = 1e-6,
+    ) -> dict:
+        """Check official baseline rows against the mandated trajectory formula when possible."""
+        path = self.require("baseline.csv")
+        df = pd.read_csv(path)
+        lower = {c.lower(): c for c in df.columns}
+        id_col = next(
+            (lower[k] for k in ("aoi_id", "parent_aoi_id", "id") if k in lower),
+            None,
+        )
+        if id_col is None:
+            raise ValueError("baseline.csv missing AOI id column")
+        trajectories = self.baseline_trajectories()
+        checks: list[dict] = []
+
+        year_col = lower.get("year")
+        cbar_col = next(
+            (
+                lower[k]
+                for k in ("cbar", "cbase", "mean_carbon_tc_ha", "carbon_tc_ha")
+                if k in lower
+            ),
+            None,
+        )
+        if year_col and cbar_col:
+            for _, row in df.iterrows():
+                aoi = str(row[id_col])
+                if aoi not in trajectories or pd.isna(row[year_col]) or pd.isna(row[cbar_col]):
+                    continue
+                year = int(row[year_col])
+                observed = float(row[cbar_col])
+                expected = trajectories[aoi].cbar(year)
+                checks.append({
+                    "aoi_id": aoi,
+                    "year": year,
+                    "official": observed,
+                    "formula": expected,
+                    "ok": math.isclose(
+                        observed, expected, rel_tol=rel_tol, abs_tol=abs_tol
+                    ),
+                })
+        else:
+            wide_columns: list[tuple[str, int]] = []
+            for column in df.columns:
+                match = re.search(r"(?:cbar|cbase)[_\-]?(20\d{2}|2015)", column.lower())
+                if match:
+                    wide_columns.append((column, int(match.group(1))))
+            for _, row in df.iterrows():
+                aoi = str(row[id_col])
+                if aoi not in trajectories:
+                    continue
+                for column, year in wide_columns:
+                    if pd.isna(row[column]):
+                        continue
+                    observed = float(row[column])
+                    expected = trajectories[aoi].cbar(year)
+                    checks.append({
+                        "aoi_id": aoi,
+                        "year": year,
+                        "column": column,
+                        "official": observed,
+                        "formula": expected,
+                        "ok": math.isclose(
+                            observed, expected, rel_tol=rel_tol, abs_tol=abs_tol
+                        ),
+                    })
+
+        mismatches = [row for row in checks if not row["ok"]]
+        return {
+            "path": str(path.relative_to(self.root)),
+            "checked_values": len(checks),
+            "mismatch_count": len(mismatches),
+            "mismatches": mismatches,
+            "status": (
+                "consistent"
+                if checks and not mismatches
+                else "mismatch"
+                if mismatches
+                else "anchors_only_or_unrecognized_schema"
+            ),
+        }
