@@ -26,6 +26,7 @@ from carbon_mrv.change.fusion import Evidence
 from carbon_mrv.data.cci import area_weight_grid, exact_weight_vectors, read_cci_clip
 from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
+from carbon_mrv.data.metadata import compact_metadata_provenance, load_official_metadata
 from carbon_mrv.data.provenance import canonical_json_hash, sha256_file
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.data.sentinel2 import read_prepared_scene
@@ -60,7 +61,7 @@ def _load_observations(scene_rows, aoi_id: str, year: int, geometry) -> list[Sce
         scene = read_prepared_scene(row.reflectance_path, row.scl_path, geometry)
         observations.append(
             SceneObservation(
-                row.observed_at.date(), scene.bands, scene.scl, scene.transform, scene.crs
+                row.observed_at.date(), scene.bands, scene.scl, scene.transform, scene.crs, row.metadata
             )
         )
     return observations
@@ -337,6 +338,7 @@ def analyze_local(
     validate_years(request.year_start, request.year_end)
     geom, requested_area = validate_geometry_geojson(request.geometry)
     dataset = LocalDataset(dataset_root)
+    official_metadata = load_official_metadata(dataset.root)
     parent_parts = dataset.intersecting_parents(geom)
     if request.parent_aoi_id:
         parent_parts = [
@@ -531,6 +533,7 @@ def analyze_local(
             "processing_config_hash": canonical_json_hash(config_material),
             "random_seed": seed,
             "uncertainty_scenario": request.uncertainty_scenario,
+            "official_metadata": compact_metadata_provenance(official_metadata),
         },
         "limitations": LIMITATIONS
         + [
