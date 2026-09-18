@@ -261,6 +261,25 @@ img{{max-width:100%;display:block}}.caption{{font-size:11px;color:#667}}.img-mis
 <h1>Satellite Carbon MRV Verification Report</h1>
 <p><b>Run:</b> {html.escape(run_id)}<br><b>Created UTC:</b> {html.escape(str(result.get('created_at_utc','')))}<br><b>Period:</b> {result['request']['year_start']}–{result['request']['year_end']}</p>
 <h2>AOI & coverage</h2><table><tr><th>Requested</th><th>Computed</th><th>Coverage</th><th>Missing</th></tr><tr><td>{result['coverage']['requested_area_ha']:.3f} ha</td><td>{result['coverage']['computed_area_ha']:.3f} ha</td><td>{result['coverage']['coverage_ratio']:.4%}</td><td>{result['coverage']['missing_area_ha']:.3f} ha</td></tr></table>
+<h2>Method & exact formulas</h2>
+<pre>c_i,t = AGB_i,t × 0.47
+C_t = Σ(exact_intersection_area_i_ha × c_i,t)
+cbar_t = C_t / A
+ΔC = C_t1 - C_t0
+E = -ΔC × 44/12
+e = E / (A × Δt)
+
+baseline: g=(cbar_2019-cbar_2015)/4; cbase,y=max(0,cbar_2019+g(y-2019))
+Ebase=-A(cbase,t1-cbase,t0)×44/12
+
+R=Ebase-Eproj-LK; LK=0
+H=max(Eproj-L, U-Eproj)
+if R≤0: Q=0
+elif H/R≥1: Q=0
+else UNC=min(1,max(0,H/R-0.10)); Radj=R(1-UNC); B=0.15×Radj; Q=floor(0.85×Radj)
+
+Sign: E&gt;0 = loss of accounted live above-ground woody biomass carbon; E&lt;0 = accumulation.
+E is not presented as a direct atmospheric-emission measurement.</pre>
 <h2>Carbon stock difference</h2><table><tr><th>Metric</th><th>Value</th></tr><tr><td>Start stock</td><td>{stock['start']['total_carbon_t']:.3f} tC</td></tr><tr><td>End stock</td><td>{stock['end']['total_carbon_t']:.3f} tC</td></tr><tr><td>ΔC</td><td>{stock['delta_c_t']:.3f} tC</td></tr><tr><td>E</td><td>{stock['E_tco2e']:.3f} tCO2e</td></tr><tr><td>e</td><td>{stock['e_tco2e_ha_year']:.6f} tCO2e/ha/year</td></tr><tr><td>Model interval L–U</td><td>{unc.get('L')} – {unc.get('U')}</td></tr><tr><td>Potential Q</td><td>{credits.get('Q')} ({html.escape(credits.get('status',''))})</td></tr></table>
 <h2>2019–2024 mean carbon trajectory</h2>{_sparkline(stock.get('yearly', []))}
 <h2>AOI & change-object map</h2>{_map_svg(geometry, events)}
