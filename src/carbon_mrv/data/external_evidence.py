@@ -19,7 +19,11 @@ def _rank_paths(root: Path, aoi_id: str, keywords: tuple[str, ...], year: int | 
         low = str(p).lower()
         if not all(k in low for k in keys):
             continue
-        score = (10 if aoi_id.lower() in low else 0) + (5 if year is not None and str(year) in low else 0)
+        score = 0
+        if aoi_id.lower() in low:
+            score += 10
+        if year is not None and str(year) in low:
+            score += 5
         candidates.append((score, len(str(p)), p))
     return [p for _, _, p in sorted(candidates, key=lambda x: (-x[0], x[1]))]
 
@@ -45,28 +49,53 @@ def gfc_event_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, lo
     arr = read_masked_band(path, geometry_wgs84)
     code = loss_year - 2000
     finite = np.isfinite(arr)
-    if not np.any(finite & (arr == code)):
+    matching = finite & (arr == code)
+    if not np.any(matching):
         return None
     return {
-        "family": "gfc", "strength": "strong", "direction": "loss",
-        "date_min": date(loss_year, 1, 1), "date_max": date(loss_year, 12, 31),
-        "path": str(path), "matching_pixels": int(np.sum(finite & (arr == code))),
+        "family": "gfc",
+        "strength": "strong",
+        "direction": "loss",
+        "date_min": date(loss_year, 1, 1),
+        "date_max": date(loss_year, 12, 31),
+        "path": str(path),
+        "matching_pixels": int(np.sum(matching)),
     }
 
 
-def _open_aligned_pair(burn_path: Path, qa_path: Path, geometry_wgs84):
-    with rasterio.open(burn_path) as burn_src, rasterio.open(qa_path) as qa_src:
-        if burn_src.crs is None or qa_src.crs is None:
+def _read_aligned_crop(reference_path: Path, other_path: Path, geometry_wgs84, *, fill: int = 0):
+    with rasterio.open(reference_path) as ref, rasterio.open(other_path) as src:
+        if ref.crs is None or src.crs is None:
             raise ValueError("MODIS evidence raster missing CRS")
-        if str(burn_src.crs) != str(qa_src.crs) or burn_src.transform != qa_src.transform or burn_src.shape != qa_src.shape:
-            raise ValueError("MODIS Burn_Date and QA grids are not aligned")
-        geom = reproject_geometry(geometry_wgs84, "EPSG:4326", burn_src.crs)
-        burn, _ = mask(burn_src, [mapping(geom)], crop=True, filled=False, indexes=1)
-        qa, _ = mask(qa_src, [mapping(geom)], crop=True, filled=False, indexes=1)
-        return np.asarray(burn.filled(0), dtype=np.int16), np.asarray(qa.filled(0), dtype=np.uint8)
+        if str(ref.crs) != str(src.crs) or ref.transform != src.transform or ref.shape != src.shape:
+            raise ValueError("MODIS evidence grids are not aligned")
+        geom = reproject_geometry(geometry_wgs84, "EPSG:4326", ref.crs)
+        arr, _ = mask(src, [mapping(geom)], crop=True, filled=False, indexes=1)
+        return np.asarray(arr.filled(fill))
+
+
+def _open_aligned_pair(burn_path: Path, qa_path: Path, geometry_wgs84):
+    burn = _read_aligned_crop(burn_path, burn_path, geometry_wgs84, fill=0).astype(np.int16)
+    qa = _read_aligned_crop(burn_path, qa_path, geometry_wgs84, fill=0).astype(np.uint8)
+    return burn, qa
+
+
+def _optional_aligned(path: Path | None, burn_path: Path, geometry_wgs84) -> np.ndarray | None:
+    if path is None:
+        return None
+    try:
+        return np.asarray(_read_aligned_crop(burn_path, path, geometry_wgs84, fill=0), dtype=float)
+    except (ValueError, rasterio.errors.RasterioError):
+        return None
 
 
 def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, year: int) -> dict | None:
+    """Build MCD64A1 fire evidence with QA and temporal-observability constraints.
+
+    Burn_Date is accepted only for land pixels with sufficient valid observations. The event
+    interval combines Burn_Date_Uncertainty with First_Day/Last_Day where those layers exist.
+    A MODIS cell is evidence for timing/cause, never exact burn geometry.
+    """
     root = Path(dataset_root)
     burn_path = find_raster(root, aoi_id, "burn", "date", year=year)
     qa_path = find_raster(root, aoi_id, "qa", year=year)
@@ -79,26 +108,56 @@ def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, y
     valid = valid_burn_mask(burn, qa)
     if not np.any(valid):
         return None
-    days = burn[valid].astype(int)
+
     uncertainty_path = find_raster(root, aoi_id, "burn", "uncert", year=year)
-    pad = 0
-    if uncertainty_path is not None:
-        try:
-            unc = read_masked_band(uncertainty_path, geometry_wgs84)
-            if unc.shape == burn.shape:
-                uv = unc[valid]
-                uv = uv[np.isfinite(uv) & (uv >= 0)]
-                if uv.size:
-                    pad = int(np.ceil(np.nanmax(uv)))
-        except Exception:
-            pass
-    lo_day = max(1, int(days.min()) - pad)
-    hi_day = min(366, int(days.max()) + pad)
+    first_day_path = find_raster(root, aoi_id, "first", "day", year=year)
+    last_day_path = find_raster(root, aoi_id, "last", "day", year=year)
+    unc = _optional_aligned(uncertainty_path, burn_path, geometry_wgs84)
+    first = _optional_aligned(first_day_path, burn_path, geometry_wgs84)
+    last = _optional_aligned(last_day_path, burn_path, geometry_wgs84)
+
+    days = burn[valid].astype(int)
+    pads = np.zeros(days.shape, dtype=int)
+    if unc is not None and unc.shape == burn.shape:
+        uv = unc[valid]
+        uv = np.where(np.isfinite(uv) & (uv >= 0), uv, 0)
+        pads = np.ceil(uv).astype(int)
+
+    first_v = np.ones(days.shape, dtype=int)
+    if first is not None and first.shape == burn.shape:
+        fv = first[valid]
+        first_v = np.where(np.isfinite(fv) & (fv > 0), fv, 1).astype(int)
+
+    last_v = np.full(days.shape, 366, dtype=int)
+    if last is not None and last.shape == burn.shape:
+        lv = last[valid]
+        last_v = np.where(np.isfinite(lv) & (lv > 0), lv, 366).astype(int)
+
+    low_pixels = np.maximum(np.maximum(1, days - pads), first_v)
+    high_pixels = np.minimum(np.minimum(366, days + pads), last_v)
+    feasible = low_pixels <= high_pixels
+    if not np.any(feasible):
+        return None
+
+    lo_day = int(np.min(low_pixels[feasible]))
+    hi_day = int(np.max(high_pixels[feasible]))
     start = date(year, 1, 1) + timedelta(days=lo_day - 1)
     end = date(year, 1, 1) + timedelta(days=hi_day - 1)
     return {
-        "family": "modis", "strength": "strong", "direction": "loss",
-        "date_min": start, "date_max": end, "supports_fire": True,
-        "burn_path": str(burn_path), "qa_path": str(qa_path),
-        "matching_pixels": int(np.sum(valid)), "uncertainty_days_max": pad,
+        "family": "modis",
+        "strength": "strong",
+        "direction": "loss",
+        "date_min": start,
+        "date_max": end,
+        "supports_fire": True,
+        "burn_path": str(burn_path),
+        "qa_path": str(qa_path),
+        "uncertainty_path": str(uncertainty_path) if uncertainty_path else None,
+        "first_day_path": str(first_day_path) if first_day_path else None,
+        "last_day_path": str(last_day_path) if last_day_path else None,
+        "matching_pixels": int(np.sum(valid)),
+        "temporally_feasible_pixels": int(np.sum(feasible)),
+        "uncertainty_days_max": int(np.max(pads)) if pads.size else 0,
+        "first_day_constraint_used": first is not None,
+        "last_day_constraint_used": last is not None,
     }
