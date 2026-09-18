@@ -33,7 +33,7 @@ from carbon_mrv.data.cci import area_weight_grid, exact_weight_vectors, read_cci
 from carbon_mrv.data.cci_change import temporal_rho_from_official_change
 from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
-from carbon_mrv.data.metadata import compact_metadata_provenance, load_official_metadata
+from carbon_mrv.data.metadata import compact_metadata_provenance, load_official_metadata, methodology_parameter_consistency
 from carbon_mrv.data.provenance import canonical_json_hash, sha256_file
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.data.sentinel2 import read_prepared_scene
@@ -857,6 +857,9 @@ def analyze_local(
             "random_seed": seed,
             "uncertainty_scenario": request.uncertainty_scenario,
             "official_metadata": compact_metadata_provenance(official_metadata),
+            "methodology_parameter_consistency": methodology_parameter_consistency(
+                official_metadata.get("methodology_parameters", {})
+            ),
         },
         "limitations": LIMITATIONS
         + [
