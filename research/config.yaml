@@ -1,0 +1,16 @@
+sites:
+  changed: RU_MORDOVIA_03
+  control: RU_TVER_01
+  additional: RU_MORDOVIA_04
+period:
+  carbon: [2020, 2022]
+  change_transition: [2020, 2021]
+change_methods: [A_dNBR, B_multi_index, C_multi_index_temporal]
+threshold_grid: [1.5, 2.0, 2.5, 3.0, 3.5]
+uncertainty_scenarios: [independent, moderate, strong]
+baseline_scenarios:
+  official: production
+  no_change: research_only
+rules:
+  external_satellite_evidence_is_not_ground_truth: true
+  no_fabricated_results: true

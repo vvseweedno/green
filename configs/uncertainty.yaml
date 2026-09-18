@@ -1,0 +1,18 @@
+default_scenario: moderate
+status: provisional_until_dataset_sensitivity_run
+quantiles: [0.05, 0.95]
+simulations: 500
+seed: 20260918
+scenarios:
+  independent:
+    temporal_rho: 0.0
+    spatial_length_pixels: 0.0
+  moderate:
+    temporal_rho: 0.5
+    spatial_length_pixels: 1.5
+  strong:
+    temporal_rho: 0.8
+    spatial_length_pixels: 3.0
+language_guardrail: >
+  Intervals are model-based quantiles under stated dependence assumptions and must not be called
+  field-calibrated confidence intervals without independent validation.
