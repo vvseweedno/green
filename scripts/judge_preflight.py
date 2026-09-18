@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import os
 import subprocess
 import sys
@@ -45,8 +46,8 @@ def _case(name: str, geometry: dict, y0: int, y1: int, parent: str | None = None
     h2 = canonical_json_hash(second)
     if h1 != h2:
         raise RuntimeError(f"non-deterministic replay for {name}: {h1} != {h2}")
-    payload = {**first, "run_id": name}
-    html_path, json_path = write_report(payload, RUNS)
+    payload = {**first, "run_id": name, "created_at_utc": datetime.now(timezone.utc).isoformat()}
+    html_path, json_path = write_report(payload, RUNS, DATASET)
     if not html_path.exists() or not json_path.exists():
         raise RuntimeError(f"report generation failed for {name}")
     print(json.dumps({
@@ -85,6 +86,10 @@ def main() -> int:
     y0, y1 = _properties_years(target.get("properties") or {})
     _case("judge_transfer_CHECK_TRANSFER_01", target["geometry"], y0, y1, None)
 
+    scorecard = Path("docs/SCORECARD.md")
+    if scorecard.exists():
+        print("\n===== SCORECARD READINESS =====\n")
+        print(scorecard.read_text(encoding="utf-8"))
     print("JUDGE PREFLIGHT PASSED: dataset verified; changed/control/transfer cases, reports and deterministic replay passed.")
     return 0
 
