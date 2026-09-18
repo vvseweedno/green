@@ -13,7 +13,7 @@ research:
 	python research/run_experiments.py --dataset data/raw
 
 demo:
-	@echo "Use: python scripts/reproduce_demo.py --request <request.json> --dataset data/raw"
+	python scripts/run_demo_suite.py --dataset data/raw --runs runs/demo
 
 api:
 	uvicorn carbon_mrv.api.app:app --reload --host 0.0.0.0 --port 8000
