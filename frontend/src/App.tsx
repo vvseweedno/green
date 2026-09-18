@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
-import maplibregl, {Map as MLMap} from 'maplibre-gl';
+import {Map as MLMap} from 'maplibre-gl';
 
 const api=import.meta.env.VITE_API_URL||'http://localhost:8000';
 const defaultGeometry={type:'Polygon',coordinates:[[[37.0,55.0],[37.01,55.0],[37.01,55.01],[37.0,55.01],[37.0,55.0]]]};
@@ -74,7 +74,7 @@ function VerifierMap({geometry,events}:{geometry:any;events:EventRecord[]}){
 
   useEffect(()=>{
     if(!el.current||mapRef.current)return;
-    const map=new maplibregl.Map({container:el.current,style:offlineStyle,center:[37,55],zoom:5});
+    const map=new MLMap({container:el.current,style:offlineStyle,center:[37,55],zoom:5});
     mapRef.current=map;
     map.on('load',()=>{
       map.addSource('aoi',{type:'geojson',data:{type:'Feature',properties:{},geometry}} as any);
