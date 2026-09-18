@@ -255,8 +255,10 @@ def _build_events(
     try:
         scene_rows = load_scene_rows(dataset.root)
     except Exception as exc:
-        warnings.append(f"Sentinel event analysis unavailable: {exc}")
-        return [], []
+        scene_rows = []
+        warnings.append(f"Local Sentinel scene index unavailable: {exc}")
+        if request.data_mode == "offline":
+            return [], []
 
     events: list[dict] = []
     layers: list[dict] = []
