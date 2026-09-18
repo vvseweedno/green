@@ -14,7 +14,7 @@ from carbon_mrv.carbon.credits import calculate_potential_credits
 from carbon_mrv.change.objects import connected_objects
 from carbon_mrv.change.transitions import robust_z, transition_maps
 from carbon_mrv.data.cci_change import temporal_rho_from_official_change
-from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
+from carbon_mrv.data.external_evidence import find_raster, gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.data.sentinel2 import read_prepared_scene
@@ -103,22 +103,41 @@ def _external_support(
     evidence_year: int,
 ) -> dict[str, float | int | None]:
     total_area = sum(o.area_ha for o in objects)
+    gfc_available = find_raster(dataset_root, aoi_id, "lossyear") is not None
+    modis_available = (
+        find_raster(dataset_root, aoi_id, "burn", "date", year=evidence_year) is not None
+        and find_raster(dataset_root, aoi_id, "qa", year=evidence_year) is not None
+    )
     gfc_objects = modis_objects = 0
     gfc_area = modis_area = 0.0
     for obj in objects:
         geom_wgs84 = reproject_geometry(obj.geometry, object_crs, "EPSG:4326")
-        if gfc_event_evidence(dataset_root, aoi_id, geom_wgs84, evidence_year):
+        if gfc_available and gfc_event_evidence(
+            dataset_root, aoi_id, geom_wgs84, evidence_year
+        ):
             gfc_objects += 1
             gfc_area += obj.area_ha
-        if modis_fire_evidence(dataset_root, aoi_id, geom_wgs84, evidence_year):
+        if modis_available and modis_fire_evidence(
+            dataset_root, aoi_id, geom_wgs84, evidence_year
+        ):
             modis_objects += 1
             modis_area += obj.area_ha
     n = len(objects)
     return {
-        "gfc_object_support_rate": gfc_objects / n if n else None,
-        "gfc_area_support_rate": gfc_area / total_area if total_area > 0 else None,
-        "modis_object_support_rate": modis_objects / n if n else None,
-        "modis_area_support_rate": modis_area / total_area if total_area > 0 else None,
+        "gfc_available": gfc_available,
+        "gfc_object_support_rate": (
+            gfc_objects / n if gfc_available and n else None
+        ),
+        "gfc_area_support_rate": (
+            gfc_area / total_area if gfc_available and total_area > 0 else None
+        ),
+        "modis_available": modis_available,
+        "modis_object_support_rate": (
+            modis_objects / n if modis_available and n else None
+        ),
+        "modis_area_support_rate": (
+            modis_area / total_area if modis_available and total_area > 0 else None
+        ),
         "detected_object_count": n,
         "detected_area_ha": total_area,
     }
