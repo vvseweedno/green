@@ -13,10 +13,13 @@ from carbon_mrv.analysis.pipeline import analyze_local
 from carbon_mrv.carbon.credits import calculate_potential_credits
 from carbon_mrv.change.objects import connected_objects
 from carbon_mrv.change.transitions import robust_z, transition_maps
+from carbon_mrv.data.cci_change import temporal_rho_from_official_change
+from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.data.sentinel2 import read_prepared_scene
 from carbon_mrv.domain.models import AnalysisRequest
+from carbon_mrv.geometry.reproject import reproject_geometry
 
 OUT = Path("research/results")
 FIG = Path("research/figures")
@@ -82,14 +85,43 @@ def _load_observations(dataset_root: Path, aoi_id: str, year: int, geometry, mon
     for row in sorted(rows, key=lambda r: r.observed_at):
         scene = read_prepared_scene(row.reflectance_path, row.scl_path, geometry)
         observations.append(SceneObservation(
-            row.observed_at.date(), scene.bands, scene.scl, scene.transform
+            row.observed_at.date(),
+            scene.bands,
+            scene.scl,
+            scene.transform,
+            scene.crs,
+            row.metadata,
         ))
     return observations
 
 
-def _area_of_mask(mask, transform) -> float:
-    dummy = np.asarray(mask, dtype=float)
-    return sum(o.area_ha for o in connected_objects(mask, dummy, transform, min_area_ha=0.0))
+def _external_support(
+    dataset_root: Path,
+    aoi_id: str,
+    objects,
+    object_crs: str,
+    evidence_year: int,
+) -> dict[str, float | int | None]:
+    total_area = sum(o.area_ha for o in objects)
+    gfc_objects = modis_objects = 0
+    gfc_area = modis_area = 0.0
+    for obj in objects:
+        geom_wgs84 = reproject_geometry(obj.geometry, object_crs, "EPSG:4326")
+        if gfc_event_evidence(dataset_root, aoi_id, geom_wgs84, evidence_year):
+            gfc_objects += 1
+            gfc_area += obj.area_ha
+        if modis_fire_evidence(dataset_root, aoi_id, geom_wgs84, evidence_year):
+            modis_objects += 1
+            modis_area += obj.area_ha
+    n = len(objects)
+    return {
+        "gfc_object_support_rate": gfc_objects / n if n else None,
+        "gfc_area_support_rate": gfc_area / total_area if total_area > 0 else None,
+        "modis_object_support_rate": modis_objects / n if n else None,
+        "modis_area_support_rate": modis_area / total_area if total_area > 0 else None,
+        "detected_object_count": n,
+        "detected_area_ha": total_area,
+    }
 
 
 def change_method_comparison(dataset_root: Path) -> list[dict]:
@@ -105,29 +137,58 @@ def change_method_comparison(dataset_root: Path) -> list[dict]:
         before, _ = annual_from_scenes(before_obs)
         after, _ = annual_from_scenes(after_obs)
         d_nbr = before["NBR"] - after["NBR"]
-        mask_a = robust_z(d_nbr) >= 2.5
-        tr_b = transition_maps(before, after, z_threshold=2.5, min_index_agreement=2, min_observations=1)
-        tr_c = transition_maps(before, after, z_threshold=2.5, min_index_agreement=2, min_observations=2)
-        for method, mask in (
-            ("A_dNBR", mask_a),
-            ("B_multi_index", tr_b.disturbance),
-            ("C_multi_index_temporal", tr_c.disturbance),
+        z_nbr = robust_z(d_nbr)
+        mask_a = z_nbr >= 2.5
+        tr_b = transition_maps(
+            before, after, z_threshold=2.5, min_index_agreement=2, min_observations=1
+        )
+        tr_c = transition_maps(
+            before, after, z_threshold=2.5, min_index_agreement=2, min_observations=2
+        )
+        for method, mask, score in (
+            ("A_dNBR", mask_a, z_nbr),
+            ("B_multi_index", tr_b.disturbance, tr_b.score),
+            ("C_multi_index_temporal", tr_c.disturbance, tr_c.score),
         ):
+            objects = connected_objects(
+                mask,
+                score,
+                before_obs[0].transform,
+                crs=before_obs[0].crs,
+                min_area_ha=0.25,
+            )
+            support = _external_support(
+                dataset_root, site, objects, before_obs[0].crs, 2021
+            )
             rows.append({
                 "aoi_id": site,
                 "transition": "2020-2021",
                 "method": method,
-                "detected_area_ha": _area_of_mask(mask, before_obs[0].transform),
+                **support,
                 "detected_pixels": int(mask.sum()),
-                "observation_coverage_before_mean": float(np.mean(before["valid_observation_count"])),
-                "observation_coverage_after_mean": float(np.mean(after["valid_observation_count"])),
-                "external_agreement_gfc": np.nan,
-                "external_agreement_modis": np.nan,
+                "observation_coverage_before_mean": float(
+                    np.mean(before["valid_observation_count"])
+                ),
+                "observation_coverage_after_mean": float(
+                    np.mean(after["valid_observation_count"])
+                ),
                 "external_evidence_note": (
-                    "Computed only when external rasters can be aligned by dataset adapter; "
-                    "never treated as ground truth."
+                    "GFC/MODIS support rates are satellite-to-satellite evidence agreement, "
+                    "not ground-truth precision/recall."
                 ),
             })
+    return rows
+
+
+def temporal_dependence_diagnostics(dataset_root: Path) -> list[dict]:
+    ds = LocalDataset(dataset_root)
+    rows = []
+    for parent in ds.parent_aois():
+        diagnostic = temporal_rho_from_official_change(
+            dataset_root, parent.aoi_id, parent.geometry
+        )
+        if diagnostic is not None:
+            rows.append({"aoi_id": parent.aoi_id, **diagnostic})
     return rows
 
 
@@ -165,6 +226,10 @@ def main():
     _write_csv(OUT / "site_summary.csv", summaries)
     _write_csv(OUT / "uncertainty_sensitivity.csv", uncertainty)
     _write_csv(OUT / "baseline_sensitivity.csv", baseline)
+    _write_csv(
+        OUT / "temporal_rho_diagnostic.csv",
+        temporal_dependence_diagnostics(root),
+    )
     try:
         changes = change_method_comparison(root)
         thresholds = threshold_sensitivity(root)
