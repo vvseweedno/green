@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from pyproj import Transformer
 from rasterio.enums import Resampling
 from rasterio.io import MemoryFile
 
@@ -58,3 +59,26 @@ def render_prepared_rgb_png(path: str | Path, *, max_size: int = 900) -> bytes:
         ) as dst:
             dst.write(rgb)
         return mem.read()
+
+
+
+def scene_preview_coordinates_wgs84(path: str | Path) -> list[list[float]]:
+    """Return MapLibre image-source corner coordinates for the prepared scene.
+
+    Order: top-left, top-right, bottom-right, bottom-left. The image itself is only
+    visualization evidence; analysis stays on the native raster grid.
+    """
+    with rasterio.open(path) as src:
+        if src.crs is None:
+            raise ValueError(f"Scene has no CRS: {path}")
+        corners_native = [
+            src.transform * (0, 0),
+            src.transform * (src.width, 0),
+            src.transform * (src.width, src.height),
+            src.transform * (0, src.height),
+        ]
+        transformer = Transformer.from_crs(src.crs, "EPSG:4326", always_xy=True)
+        return [
+            [float(lon), float(lat)]
+            for lon, lat in (transformer.transform(x, y) for x, y in corners_native)
+        ]
