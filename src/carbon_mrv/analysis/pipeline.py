@@ -398,6 +398,22 @@ def analyze_local(
                 }
             )
 
+    yearly.sort(key=lambda p: p["year"])
+    if yearly:
+        first_total = float(yearly[0]["total_carbon_t"])
+        previous_total = None
+        for point in yearly:
+            total = float(point["total_carbon_t"])
+            annual_delta = None if previous_total is None else total - previous_total
+            cumulative_delta = total - first_total
+            point["annual_delta_c_t"] = annual_delta
+            point["annual_E_tco2e"] = (
+                None if annual_delta is None else -annual_delta * CO2_PER_C
+            )
+            point["cumulative_delta_c_t"] = cumulative_delta
+            point["cumulative_E_tco2e"] = -cumulative_delta * CO2_PER_C
+            previous_total = total
+
     if request.year_start not in stock_by_year or request.year_end not in stock_by_year:
         raise ValueError("Required CCI start/end year data are unavailable")
 
