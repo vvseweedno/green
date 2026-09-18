@@ -74,6 +74,7 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
   const el=useRef<HTMLDivElement>(null);
   const mapRef=useRef<MLMap|null>(null);
   const [showAoi,setShowAoi]=useState(true),[showEvents,setShowEvents]=useState(true);
+  const [showGfc,setShowGfc]=useState(true),[showModis,setShowModis]=useState(true),[showCci,setShowCci]=useState(true);
   const [drawMode,setDrawMode]=useState(false);
   const [drawPoints,setDrawPoints]=useState<[number,number][]>([]);
   const eventsFc=useMemo(()=>({
@@ -84,6 +85,25 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
       geometry:e.geometry
     }))
   }),[events]);
+  const evidenceCollection=(family:string)=>({
+    type:'FeatureCollection',
+    features:(events||[]).flatMap(event=>{
+      const matching=(event.evidence||[]).filter((raw:any)=>raw?.family===family);
+      if(family==='cci'&&matching.length&&event.geometry){
+        return [{type:'Feature',properties:{family,event_id:event.event_id},geometry:event.geometry}];
+      }
+      return matching
+        .filter((raw:any)=>raw?.footprint_geometry_wgs84)
+        .map((raw:any)=>({
+          type:'Feature',
+          properties:{family,event_id:event.event_id,footprint_kind:raw.footprint_kind||''},
+          geometry:raw.footprint_geometry_wgs84
+        }));
+    })
+  });
+  const gfcFc=useMemo(()=>evidenceCollection('gfc'),[events]);
+  const modisFc=useMemo(()=>evidenceCollection('modis'),[events]);
+  const cciFc=useMemo(()=>evidenceCollection('cci'),[events]);
 
   useEffect(()=>{
     if(!el.current||mapRef.current)return;
@@ -96,6 +116,14 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
       map.addSource('events',{type:'geojson',data:eventsFc as any});
       map.addLayer({id:'event-fill',type:'fill',source:'events',paint:{'fill-color':['match',['get','direction'],'disturbance','#cf4a2c','recovery','#3182bd','#777'],'fill-opacity':0.36}});
       map.addLayer({id:'event-line',type:'line',source:'events',paint:{'line-color':'#222','line-width':1.5}});
+      map.addSource('gfc',{type:'geojson',data:gfcFc as any});
+      map.addLayer({id:'gfc-fill',type:'fill',source:'gfc',paint:{'fill-color':'#e69f00','fill-opacity':0.38}});
+      map.addLayer({id:'gfc-line',type:'line',source:'gfc',paint:{'line-color':'#8b5600','line-width':1}});
+      map.addSource('modis',{type:'geojson',data:modisFc as any});
+      map.addLayer({id:'modis-fill',type:'fill',source:'modis',paint:{'fill-color':'#d73027','fill-opacity':0.18}});
+      map.addLayer({id:'modis-line',type:'line',source:'modis',paint:{'line-color':'#d73027','line-width':2,'line-dasharray':[2,1]}});
+      map.addSource('cci',{type:'geojson',data:cciFc as any});
+      map.addLayer({id:'cci-line',type:'line',source:'cci',paint:{'line-color':'#6a3d9a','line-width':2,'line-dasharray':[1,1]}});
       map.addSource('draft',{type:'geojson',data:draftGeoJSON([]) as any});
       map.addLayer({id:'draft-fill',type:'fill',source:'draft',paint:{'fill-color':'#e69f00','fill-opacity':0.18}});
       map.addLayer({id:'draft-line',type:'line',source:'draft',paint:{'line-color':'#b66b00','line-width':3,'line-dasharray':[2,1]}});
@@ -113,7 +141,10 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
   useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     (map.getSource('events') as any)?.setData(eventsFc);
-  },[eventsFc]);
+    (map.getSource('gfc') as any)?.setData(gfcFc);
+    (map.getSource('modis') as any)?.setData(modisFc);
+    (map.getSource('cci') as any)?.setData(cciFc);
+  },[eventsFc,gfcFc,modisFc,cciFc]);
 
   useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
@@ -124,6 +155,18 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     for(const id of ['event-fill','event-line'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',showEvents?'visible':'none');
   },[showEvents]);
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    for(const id of ['gfc-fill','gfc-line'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',showGfc?'visible':'none');
+  },[showGfc]);
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    for(const id of ['modis-fill','modis-line'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',showModis?'visible':'none');
+  },[showModis]);
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    if(map.getLayer('cci-line'))map.setLayoutProperty('cci-line','visibility',showCci?'visible':'none');
+  },[showCci]);
 
   useEffect(()=>{
     const map=mapRef.current;if(!map)return;
@@ -159,6 +202,9 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
     <div className="map-toolbar">
       <label><input type="checkbox" checked={showAoi} onChange={e=>setShowAoi(e.target.checked)}/> AOI</label>
       <label><input type="checkbox" checked={showEvents} onChange={e=>setShowEvents(e.target.checked)}/> change objects</label>
+      <label><input type="checkbox" checked={showGfc} onChange={e=>setShowGfc(e.target.checked)}/> GFC loss</label>
+      <label><input type="checkbox" checked={showModis} onChange={e=>setShowModis(e.target.checked)}/> MODIS fire support</label>
+      <label><input type="checkbox" checked={showCci} onChange={e=>setShowCci(e.target.checked)}/> CCI overlap</label>
       <button type="button" className={drawMode?'active':''} onClick={()=>setDrawMode(v=>!v)}>{drawMode?'Drawing…':'Draw AOI'}</button>
       {drawMode&&<button type="button" disabled={drawPoints.length<3} onClick={finishDraft}>Finish</button>}
       {drawPoints.length>0&&<button type="button" onClick={clearDraft}>Clear</button>}
