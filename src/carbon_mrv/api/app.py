@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -42,7 +43,10 @@ def create_analysis(request: AnalysisRequest):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, str(exc)) from exc
     result["run_id"] = run_id
-    _run_path(run_id).write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    result["created_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _run_path(run_id).write_text(
+        json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+    )
     write_report(result, RUNS)
     return result
 
@@ -55,7 +59,7 @@ def get_analysis(run_id: str):
 @app.get("/api/v1/analysis/{run_id}/layers")
 def get_layers(run_id: str):
     result = _load(run_id)
-    return {"run_id": run_id, "layers": result.get("layers", []), "events": result.get("events", [])}
+    return {"run_id": run_id, "layers": result.get("layers", [])}
 
 
 @app.get("/api/v1/analysis/{run_id}/events")
