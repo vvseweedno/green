@@ -49,6 +49,8 @@ def annual_from_scenes(scenes: list[SceneObservation]):
             "radiometry": meta.get("radiometry")
             or meta.get("scale_offset")
             or meta.get("bands"),
+            "reflectance_path": meta.get("reflectance_path"),
+            "scl_path": meta.get("scl_path"),
         })
     return robust_annual_composite(index_scenes, masks), quality
 
