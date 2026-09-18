@@ -51,7 +51,7 @@ def _sum_stock(parts: list[StockEstimate]) -> StockEstimate:
     return StockEstimate(area, total, total / area)
 
 
-def _load_observations(scene_rows, aoi_id: str, year: int, geometry) -> list[SceneObservation]:
+def _load_observations(scene_rows, aoi_id: str, year: int, geometry, dataset_root: Path) -> list[SceneObservation]:
     rows = [
         r for r in scene_rows
         if r.aoi_id == aoi_id and r.observed_at.year == year and r.observed_at.month in {6, 7, 8}
@@ -59,9 +59,28 @@ def _load_observations(scene_rows, aoi_id: str, year: int, geometry) -> list[Sce
     observations = []
     for row in sorted(rows, key=lambda r: r.observed_at):
         scene = read_prepared_scene(row.reflectance_path, row.scl_path, geometry)
+        try:
+            reflectance_rel = str(row.reflectance_path.resolve().relative_to(dataset_root.resolve()))
+        except ValueError:
+            reflectance_rel = None
+        try:
+            scl_rel = str(row.scl_path.resolve().relative_to(dataset_root.resolve()))
+        except ValueError:
+            scl_rel = None
+        scene_metadata = {
+            **(row.metadata or {}),
+            "scene_id": row.scene_id or (row.metadata or {}).get("scene_id"),
+            "reflectance_path": reflectance_rel,
+            "scl_path": scl_rel,
+        }
         observations.append(
             SceneObservation(
-                row.observed_at.date(), scene.bands, scene.scl, scene.transform, scene.crs, row.metadata
+                row.observed_at.date(),
+                scene.bands,
+                scene.scl,
+                scene.transform,
+                scene.crs,
+                scene_metadata,
             )
         )
     return observations
@@ -148,8 +167,8 @@ def _build_events(
             )
 
         for year in range(request.year_start, request.year_end):
-            before_obs = _load_observations(scene_rows, parent.aoi_id, year, part_geom)
-            after_obs = _load_observations(scene_rows, parent.aoi_id, year + 1, part_geom)
+            before_obs = _load_observations(scene_rows, parent.aoi_id, year, part_geom, dataset.root)
+            after_obs = _load_observations(scene_rows, parent.aoi_id, year + 1, part_geom, dataset.root)
             if not before_obs or not after_obs:
                 continue
             try:
