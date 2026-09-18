@@ -4,17 +4,31 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from carbon_mrv.analysis.change_pipeline import (
+    SceneObservation,
+    detect_transition,
+    fused_event_record,
+    sentinel_evidence,
+)
 from carbon_mrv.carbon.baseline import aggregate_baseline
+from carbon_mrv.carbon.contribution import event_emission_contribution
 from carbon_mrv.carbon.credits import calculate_potential_credits
 from carbon_mrv.carbon.stock import (
+    CF,
     StockEstimate,
     annualized_emission_intensity,
     stock_difference_emission_tco2e,
     stock_from_weighted_pixels,
 )
+from carbon_mrv.change.fusion import Evidence
 from carbon_mrv.data.cci import area_weight_grid, exact_weight_vectors, read_cci_clip
+from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.data.provenance import canonical_json_hash, sha256_file
+from carbon_mrv.data.scene_index import load_scene_rows
+from carbon_mrv.data.sentinel2 import read_prepared_scene
 from carbon_mrv.domain.models import AnalysisRequest
 from carbon_mrv.geometry.area import geodesic_area_ha
 from carbon_mrv.geometry.validate import validate_geometry_geojson, validate_years
@@ -36,6 +50,283 @@ def _sum_stock(parts: list[StockEstimate]) -> StockEstimate:
     return StockEstimate(area, total, total / area)
 
 
+def _load_observations(scene_rows, aoi_id: str, year: int, geometry) -> list[SceneObservation]:
+    rows = [
+        r for r in scene_rows
+        if r.aoi_id == aoi_id and r.observed_at.year == year and r.observed_at.month in {6, 7, 8}
+    ]
+    observations = []
+    for row in sorted(rows, key=lambda r: r.observed_at):
+        scene = read_prepared_scene(row.reflectance_path, row.scl_path, geometry)
+        observations.append(
+            SceneObservation(
+                row.observed_at.date(), scene.bands, scene.scl, scene.transform, scene.crs
+            )
+        )
+    return observations
+
+
+def _evidence_from_dict(payload: dict) -> Evidence:
+    return Evidence(
+        payload["family"],
+        payload.get("strength", "partial"),
+        payload.get("direction", "unknown"),
+        payload.get("date_min"),
+        payload.get("date_max"),
+        bool(payload.get("supports_fire", False)),
+        payload.get("note"),
+    )
+
+
+def _event_carbon(
+    geom_wgs84,
+    start_clip,
+    end_clip,
+    aoi_area_ha: float,
+    total_abs_signal_t: float,
+):
+    if (
+        start_clip.agb.shape != end_clip.agb.shape
+        or tuple(start_clip.transform) != tuple(end_clip.transform)
+    ):
+        return None
+    contribution = event_emission_contribution(
+        geom_wgs84, start_clip.agb, end_clip.agb, start_clip.transform
+    )
+    contribution["share_of_aoi_area"] = (
+        contribution["area_ha"] / aoi_area_ha if aoi_area_ha > 0 else None
+    )
+    contribution["share_of_absolute_carbon_change_signal"] = (
+        contribution["absolute_carbon_change_signal_t"] / total_abs_signal_t
+        if total_abs_signal_t > 0
+        else None
+    )
+    return contribution
+
+
+def _build_events(
+    dataset: LocalDataset,
+    parent_parts,
+    request: AnalysisRequest,
+    parent_year_inputs: dict,
+    warnings: list[str],
+) -> tuple[list[dict], list[dict]]:
+    try:
+        scene_rows = load_scene_rows(dataset.root)
+    except Exception as exc:
+        warnings.append(f"Sentinel event analysis unavailable: {exc}")
+        return [], []
+
+    events: list[dict] = []
+    layers: list[dict] = []
+    for parent, part_geom in parent_parts:
+        start_key = (parent.aoi_id, request.year_start)
+        end_key = (parent.aoi_id, request.year_end)
+        start_clip = parent_year_inputs.get(start_key, (None, None, None))[0]
+        end_clip = parent_year_inputs.get(end_key, (None, None, None))[0]
+        total_abs_signal = 0.0
+        if (
+            start_clip is not None
+            and end_clip is not None
+            and start_clip.agb.shape == end_clip.agb.shape
+            and tuple(start_clip.transform) == tuple(end_clip.transform)
+        ):
+            weights = area_weight_grid(start_clip, part_geom)
+            valid = (
+                np.isfinite(start_clip.agb)
+                & np.isfinite(end_clip.agb)
+                & np.isfinite(weights)
+                & (weights > 0)
+            )
+            total_abs_signal = float(
+                np.sum(
+                    weights[valid]
+                    * np.abs(end_clip.agb[valid] - start_clip.agb[valid])
+                    * CF
+                )
+            )
+
+        for year in range(request.year_start, request.year_end):
+            before_obs = _load_observations(scene_rows, parent.aoi_id, year, part_geom)
+            after_obs = _load_observations(scene_rows, parent.aoi_id, year + 1, part_geom)
+            if not before_obs or not after_obs:
+                continue
+            try:
+                detected = detect_transition(before_obs, after_obs)
+            except Exception as exc:
+                warnings.append(
+                    f"Change transition {parent.aoi_id} {year}->{year+1} failed: {exc}"
+                )
+                continue
+
+            layers.append(
+                {
+                    "id": f"sentinel-change-{parent.aoi_id}-{year}-{year+1}",
+                    "family": "sentinel2",
+                    "type": "change_objects",
+                    "transition": [year, year + 1],
+                    "crs": detected["crs"],
+                    "quality": detected["quality"],
+                }
+            )
+
+            for direction, objects in (
+                ("disturbance", detected["loss_objects"]),
+                ("recovery", detected["gain_objects"]),
+            ):
+                for idx, obj in enumerate(objects, 1):
+                    geom_wgs84, s2_ev = sentinel_evidence(
+                        obj, before_obs, after_obs, direction=direction
+                    )
+                    ev_objects = [s2_ev]
+                    details = [
+                        {
+                            "family": "sentinel2",
+                            "strength": "strong",
+                            "direction": s2_ev.direction,
+                            "date_min": s2_ev.date_min.isoformat() if s2_ev.date_min else None,
+                            "date_max": s2_ev.date_max.isoformat() if s2_ev.date_max else None,
+                            "note": "Robust annual NDVI/NBR/NDMI agreement",
+                        }
+                    ]
+
+                    if direction == "disturbance":
+                        for candidate_year in (year, year + 1):
+                            gfc = gfc_event_evidence(
+                                dataset.root, parent.aoi_id, geom_wgs84, candidate_year
+                            )
+                            if gfc:
+                                ev_objects.append(_evidence_from_dict(gfc))
+                                details.append(
+                                    {
+                                        **{
+                                            k: (
+                                                v.isoformat()
+                                                if hasattr(v, "isoformat")
+                                                else v
+                                            )
+                                            for k, v in gfc.items()
+                                            if k not in {"path"}
+                                        },
+                                        "source_path": gfc.get("path"),
+                                        "note": "GFC is loss evidence, not cause or biomass amount.",
+                                    }
+                                )
+                                break
+                        for candidate_year in (year, year + 1):
+                            modis = modis_fire_evidence(
+                                dataset.root, parent.aoi_id, geom_wgs84, candidate_year
+                            )
+                            if modis:
+                                ev_objects.append(_evidence_from_dict(modis))
+                                details.append(
+                                    {
+                                        **{
+                                            k: (
+                                                v.isoformat()
+                                                if hasattr(v, "isoformat")
+                                                else v
+                                            )
+                                            for k, v in modis.items()
+                                            if k not in {"burn_path", "qa_path"}
+                                        },
+                                        "source_paths": [
+                                            modis.get("burn_path"),
+                                            modis.get("qa_path"),
+                                        ],
+                                        "note": "MODIS 500 m pixels support fire timing/cause, not exact burn geometry.",
+                                    }
+                                )
+                                break
+
+                    carbon = None
+                    event_limitations = []
+                    if start_clip is not None and end_clip is not None:
+                        carbon = _event_carbon(
+                            geom_wgs84,
+                            start_clip,
+                            end_clip,
+                            geodesic_area_ha(part_geom),
+                            total_abs_signal,
+                        )
+                        if carbon is not None:
+                            cdir = "loss" if carbon["E_event_tco2e"] > 0 else "gain"
+                            expected = (
+                                "loss" if direction == "disturbance" else "gain"
+                            )
+                            if (
+                                cdir == expected
+                                and abs(carbon["E_event_tco2e"]) > 0
+                            ):
+                                ev_objects.append(Evidence("cci", "partial", cdir))
+                                details.append(
+                                    {
+                                        "family": "cci",
+                                        "strength": "partial",
+                                        "direction": cdir,
+                                        "note": "CCI request-period stock signal overlaps the event geometry.",
+                                    }
+                                )
+                        else:
+                            event_limitations.append(
+                                "Event carbon contribution unavailable because start/end CCI grids do not align."
+                            )
+                    else:
+                        event_limitations.append(
+                            "Event carbon contribution unavailable because request-period CCI inputs are missing."
+                        )
+
+                    event_id = (
+                        f"{parent.aoi_id}-{year}-{year+1}-{direction}-{idx:03d}"
+                    )
+                    events.append(
+                        fused_event_record(
+                            event_id=event_id,
+                            geometry_wgs84=geom_wgs84,
+                            area_ha=obj.area_ha,
+                            direction=direction,
+                            evidence=ev_objects,
+                            evidence_details=details,
+                            data_quality=[
+                                {"stage": "before", **q}
+                                for q in detected["quality"]["before"]
+                            ]
+                            + [
+                                {"stage": "after", **q}
+                                for q in detected["quality"]["after"]
+                            ],
+                            carbon_contribution=carbon,
+                            limitations=event_limitations
+                            + [
+                                "Event E is contribution to the observed stock-change signal, not automatic causal attribution."
+                            ],
+                        )
+                    )
+    return events, layers
+
+
+def _price_scenarios(q: int | None) -> list[dict]:
+    if q is None:
+        return []
+    return [
+        {
+            "label": "1000 RUB/tCO2e",
+            "price_rub_per_unit": 1000,
+            "gross_value_rub": q * 1000,
+        },
+        {
+            "label": "3000 RUB/tCO2e",
+            "price_rub_per_unit": 3000,
+            "gross_value_rub": q * 3000,
+        },
+        {
+            "label": "5000 RUB/tCO2e",
+            "price_rub_per_unit": 5000,
+            "gross_value_rub": q * 5000,
+        },
+    ]
+
+
 def analyze_local(
     request: AnalysisRequest,
     dataset_root: str | Path,
@@ -48,7 +339,9 @@ def analyze_local(
     dataset = LocalDataset(dataset_root)
     parent_parts = dataset.intersecting_parents(geom)
     if request.parent_aoi_id:
-        parent_parts = [(p, g) for p, g in parent_parts if p.aoi_id == request.parent_aoi_id]
+        parent_parts = [
+            (p, g) for p, g in parent_parts if p.aoi_id == request.parent_aoi_id
+        ]
     if not parent_parts:
         raise ValueError("AOI is outside provided parent AOI coverage")
 
@@ -74,12 +367,14 @@ def analyze_local(
         if estimates:
             total = _sum_stock(estimates)
             stock_by_year[year] = total
-            yearly.append({
-                "year": year,
-                "area_ha": total.area_ha,
-                "total_carbon_t": total.total_carbon_t,
-                "mean_carbon_t_ha": total.mean_carbon_t_ha,
-            })
+            yearly.append(
+                {
+                    "year": year,
+                    "area_ha": total.area_ha,
+                    "total_carbon_t": total.total_carbon_t,
+                    "mean_carbon_t_ha": total.mean_carbon_t_ha,
+                }
+            )
 
     if request.year_start not in stock_by_year or request.year_end not in stock_by_year:
         raise ValueError("Required CCI start/end year data are unavailable")
@@ -89,7 +384,9 @@ def analyze_local(
     computed_area = min(start.area_ha, end.area_ha)
     cov = coverage_result(requested_area, computed_area)
     E = stock_difference_emission_tco2e(start, end)
-    e = annualized_emission_intensity(E, computed_area, request.year_start, request.year_end)
+    e = annualized_emission_intensity(
+        E, computed_area, request.year_start, request.year_end
+    )
 
     u_parts = []
     for parent, part_geom in parent_parts:
@@ -99,7 +396,10 @@ def analyze_local(
             continue
         c0, _, _ = parent_year_inputs[key0]
         c1, _, _ = parent_year_inputs[key1]
-        if c0.agb.shape != c1.agb.shape or tuple(c0.transform) != tuple(c1.transform):
+        if (
+            c0.agb.shape != c1.agb.shape
+            or tuple(c0.transform) != tuple(c1.transform)
+        ):
             continue
         weights = area_weight_grid(c0, part_geom)
         try:
@@ -129,7 +429,9 @@ def analyze_local(
                 "simulations": simulations,
                 "seed": seed,
                 "cross_parent_aggregation": "conservative bound summation",
-                "parts": [{"aoi_id": aoi, **asdict(u)} for aoi, u in u_parts],
+                "parts": [
+                    {"aoi_id": aoi, **asdict(u)} for aoi, u in u_parts
+                ],
             },
             "sensitivity": [],
         }
@@ -145,20 +447,25 @@ def analyze_local(
         trajectory = baseline_map.get(parent.aoi_id)
         if trajectory:
             baseline_parts.append((trajectory, area))
-            baseline_proof.append({
-                "aoi_id": parent.aoi_id,
-                "area_ha": area,
-                "cbar_2015": trajectory.cbar_2015_tC_ha,
-                "cbar_2019": trajectory.cbar_2019_tC_ha,
-            })
+            baseline_proof.append(
+                {
+                    "aoi_id": parent.aoi_id,
+                    "area_ha": area,
+                    "cbar_2015": trajectory.cbar_2015_tC_ha,
+                    "cbar_2019": trajectory.cbar_2019_tC_ha,
+                }
+            )
 
     baseline_available = len(baseline_parts) == len(parent_parts)
     Ebase = (
-        aggregate_baseline(baseline_parts, request.year_start, request.year_end)
-        if baseline_available else None
+        aggregate_baseline(
+            baseline_parts, request.year_start, request.year_end
+        )
+        if baseline_available
+        else None
     )
 
-    credits = calculate_potential_credits(
+    credits_obj = calculate_potential_credits(
         area_ha=computed_area,
         year_start=request.year_start,
         year_end=request.year_end,
@@ -168,6 +475,16 @@ def analyze_local(
         upper=upper,
         full_coverage=cov.reason is None,
         baseline_available=baseline_available,
+    )
+    credits = asdict(credits_obj)
+    credits["scenario_values_rub"] = _price_scenarios(credits_obj.Q)
+    credits["price_scenario_disclaimer"] = (
+        "Illustrative gross-value scenarios only; not a market-price forecast."
+    )
+
+    warnings = [cov.reason] if cov.reason else []
+    events, layers = _build_events(
+        dataset, parent_parts, request, parent_year_inputs, warnings
     )
 
     config_material = {
@@ -179,7 +496,10 @@ def analyze_local(
 
     return {
         "status": "completed",
-        "request": {**request.model_dump(), "requested_area_ha": requested_area},
+        "request": {
+            **request.model_dump(),
+            "requested_area_ha": requested_area,
+        },
         "coverage": asdict(cov),
         "stock": {
             "yearly": yearly,
@@ -192,20 +512,29 @@ def analyze_local(
             "carbon_pool": "live above-ground woody biomass",
         },
         "uncertainty": uncertainty,
-        "events": [],
+        "events": events,
+        "layers": layers,
         "baseline": {
             "Ebase": Ebase,
             "parent_parts": baseline_proof,
             "available": baseline_available,
         },
-        "credits": asdict(credits),
+        "credits": credits,
         "provenance": {
-            "sources": ["ESA CCI Biomass v7.0", "official methodology/baseline.csv"],
+            "sources": [
+                "ESA CCI Biomass v7.0",
+                "official methodology/baseline.csv",
+                "Sentinel-2 L2A prepared scenes when available",
+                "GFC/MODIS evidence when available",
+            ],
             "checksums": provenance_files,
             "processing_config_hash": canonical_json_hash(config_material),
+            "random_seed": seed,
+            "uncertainty_scenario": request.uncertainty_scenario,
         },
-        "limitations": LIMITATIONS + [
-            "Change-event modules never fabricate event objects when required Sentinel/GFC/MODIS inputs are absent."
+        "limitations": LIMITATIONS
+        + [
+            "Missing external evidence reduces event confidence instead of being silently inferred."
         ],
-        "warnings": ([cov.reason] if cov.reason else []),
+        "warnings": warnings,
     }
