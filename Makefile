@@ -1,4 +1,4 @@
-.PHONY: setup verify-data test research demo api frontend judge
+.PHONY: setup verify-data test research demo freeze-golden api frontend judge
 
 setup:
 	python -m pip install -r requirements.lock
@@ -15,6 +15,9 @@ research:
 
 demo:
 	python scripts/run_demo_suite.py --dataset data/raw --runs runs/demo
+
+freeze-golden:
+	python scripts/freeze_golden.py --dataset data/raw
 
 api:
 	uvicorn carbon_mrv.api.app:app --reload --host 0.0.0.0 --port 8000
