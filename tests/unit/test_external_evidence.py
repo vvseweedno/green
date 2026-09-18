@@ -6,7 +6,7 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import box
 
-from carbon_mrv.data.external_evidence import modis_fire_evidence
+from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 
 
 def _write(path: Path, value: int, dtype: str):
@@ -30,3 +30,15 @@ def test_modis_interval_uses_uncertainty_and_first_last_day(tmp_path: Path):
     assert out["date_max"]==date(2021,1,1)+timedelta(days=251)
     assert out["first_day_constraint_used"] is True
     assert out["last_day_constraint_used"] is True
+    assert out["footprint_geometry_wgs84"]["type"] in {"Polygon","MultiPolygon"}
+    assert "not exact burn perimeter" in out["footprint_kind"]
+
+
+def test_gfc_evidence_exposes_loss_pixel_footprint(tmp_path: Path):
+    path=tmp_path/"RU_TVER_01_lossyear.tif"
+    _write(path,21,"uint8")
+    out=gfc_event_evidence(tmp_path,"RU_TVER_01",box(0,0.9,0.1,1.0),2021)
+    assert out is not None
+    assert out["matching_pixels"]==1
+    assert out["footprint_geometry_wgs84"]["type"] in {"Polygon","MultiPolygon"}
+    assert out["footprint_kind"]=="GFC loss-pixel support"
