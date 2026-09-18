@@ -39,3 +39,30 @@ class ArrayCache:
         with np.load(npz) as z:
             arrays = {name: z[name] for name in z.files}
         return arrays, metadata
+
+
+    def metadata_records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["_metadata_file"] = path.name
+                records.append(payload)
+            except (json.JSONDecodeError, OSError):
+                continue
+        return records
+
+    def find_by_metadata(self, key: str, value: Any) -> list[dict[str, Any]]:
+        return [record for record in self.metadata_records() if record.get(key) == value]
+
+    def replay_by_request_hash(self, request_hash: str) -> list[tuple[dict[str, np.ndarray], dict[str, Any]]]:
+        outputs = []
+        for record in self.find_by_metadata("request_hash", request_hash):
+            artifact = record.get("artifact")
+            if not artifact:
+                continue
+            key = Path(str(artifact)).stem
+            cached = self.get(key)
+            if cached is not None:
+                outputs.append(cached)
+        return outputs
