@@ -12,7 +12,7 @@ import rasterio
 from carbon_mrv.data.catalog import verify_file_catalog
 from carbon_mrv.data.external_evidence import find_raster
 from carbon_mrv.data.local import LocalDataset
-from carbon_mrv.data.metadata import MANDATORY_METADATA_FILES, load_official_metadata
+from carbon_mrv.data.metadata import MANDATORY_METADATA_FILES, load_official_metadata, methodology_parameter_consistency
 from carbon_mrv.data.scene_index import load_scene_rows
 from carbon_mrv.geometry.validate import validate_geometry_geojson
 
@@ -107,6 +107,13 @@ def main() -> int:
     if not params:
         errors.append("parameters.csv contains no readable methodology parameters")
     evidence["methodology_parameters"] = params
+    parameter_consistency = methodology_parameter_consistency(params)
+    evidence["methodology_parameter_consistency"] = parameter_consistency
+    if parameter_consistency["mismatch_count"] > 0:
+        errors.append(
+            "parameters.csv disagrees with hard-required case constants: "
+            f"{parameter_consistency['mismatch_count']} recognized mismatch(es)"
+        )
 
     try:
         scene_rows = load_scene_rows(root)
