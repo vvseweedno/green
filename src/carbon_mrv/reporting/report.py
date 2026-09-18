@@ -134,6 +134,97 @@ def _evidence_gallery(events: list[dict], dataset_root: Path | None, limit: int 
     return "".join(blocks)
 
 
+
+def _outer_rings(geometry: dict) -> list[list[list[float]]]:
+    if not isinstance(geometry, dict):
+        return []
+    kind = geometry.get("type")
+    coordinates = geometry.get("coordinates") or []
+    if kind == "Polygon":
+        return [coordinates[0]] if coordinates else []
+    if kind == "MultiPolygon":
+        return [polygon[0] for polygon in coordinates if polygon]
+    return []
+
+
+def _map_svg(aoi: dict, events: list[dict], width: int = 720, height: int = 460) -> str:
+    """Self-contained WGS84 evidence map for the saved report.
+
+    This intentionally has no external basemap dependency. It visualizes the exact request
+    geometry and vector change objects; satellite evidence remains in the adjacent image gallery.
+    """
+    aoi_rings = _outer_rings(aoi)
+    if not aoi_rings:
+        return "<p>Map unavailable: AOI geometry is missing or unsupported.</p>"
+    points = [p for ring in aoi_rings for p in ring if len(p) >= 2]
+    if not points:
+        return "<p>Map unavailable: AOI has no coordinates.</p>"
+    xs = [float(p[0]) for p in points]
+    ys = [float(p[1]) for p in points]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    dx = max(maxx - minx, 1e-9)
+    dy = max(maxy - miny, 1e-9)
+    pad = 28.0
+    scale = min((width - 2 * pad) / dx, (height - 2 * pad) / dy)
+    used_w, used_h = dx * scale, dy * scale
+    x0 = (width - used_w) / 2.0
+    y0 = (height - used_h) / 2.0
+
+    def project(point):
+        x, y = float(point[0]), float(point[1])
+        return x0 + (x - minx) * scale, height - (y0 + (y - miny) * scale)
+
+    def path_for(ring):
+        coords = [project(p) for p in ring if len(p) >= 2]
+        if not coords:
+            return ""
+        return "M " + " L ".join(f"{x:.2f} {y:.2f}" for x, y in coords) + " Z"
+
+    aoi_paths = "".join(
+        f"<path d='{path_for(ring)}' fill='#dfeee4' stroke='#176b3a' stroke-width='2.2'/>"
+        for ring in aoi_rings
+    )
+    event_paths = []
+    labels = []
+    for event in events:
+        direction = str(event.get("direction", "unknown"))
+        fill = "#edb5a8" if direction == "disturbance" else "#afd2e6" if direction == "recovery" else "#d0d0d0"
+        for ring in _outer_rings(event.get("geometry") or {}):
+            d = path_for(ring)
+            if not d:
+                continue
+            event_paths.append(
+                f"<path d='{d}' fill='{fill}' fill-opacity='0.55' stroke='#333' stroke-width='1'/>"
+            )
+            projected = [project(p) for p in ring if len(p) >= 2]
+            if projected:
+                cx = sum(p[0] for p in projected) / len(projected)
+                cy = sum(p[1] for p in projected) / len(projected)
+                labels.append(
+                    f"<text x='{cx:.1f}' y='{cy:.1f}' font-size='9' text-anchor='middle'>"
+                    f"{html.escape(str(event.get('event_id','')))}</text>"
+                )
+    extent = (
+        f"{minx:.5f}, {miny:.5f} → {maxx:.5f}, {maxy:.5f}"
+    )
+    return (
+        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='AOI and change objects map'>"
+        f"<rect width='{width}' height='{height}' fill='#f7faf7'/>"
+        f"{aoi_paths}{''.join(event_paths)}{''.join(labels)}"
+        f"<text x='12' y='18' font-size='10'>WGS84 extent: {extent}</text>"
+        f"<text x='{width-16}' y='22' font-size='14' text-anchor='end'>N ↑</text>"
+        "<g transform='translate(12,34)'><rect width='12' height='12' fill='#dfeee4' stroke='#176b3a'/>"
+        "<text x='18' y='10' font-size='10'>AOI</text>"
+        "<rect x='58' width='12' height='12' fill='#edb5a8' stroke='#333'/>"
+        "<text x='76' y='10' font-size='10'>disturbance</text>"
+        "<rect x='150' width='12' height='12' fill='#afd2e6' stroke='#333'/>"
+        "<text x='168' y='10' font-size='10'>recovery</text></g>"
+        "</svg>"
+        "<p class='caption'>Self-contained geometry map; no external basemap. "
+        "MODIS footprints are not treated as exact burn geometry.</p>"
+    )
+
 def write_report(
     result: dict,
     output_dir: str | Path,
@@ -164,7 +255,7 @@ pre{{overflow:auto;background:#eef2ef;padding:12px;max-height:520px}}.warn{{back
 svg{{width:100%;background:#f7faf7;border:1px solid #dce5dd;border-radius:8px}}code{{background:#eef2ef;padding:2px 4px}}
 details{{border:1px solid #dce5dd;border-radius:8px;padding:10px;margin:10px 0}}summary{{font-weight:700;cursor:pointer}}
 .scene-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}}figure{{margin:0}}figcaption{{padding:6px;background:#f3f6f3}}
-img{{max-width:100%;display:block}}.img-missing{{min-height:160px;border:1px dashed #ccd6cf;display:grid;place-items:center;text-align:center;color:#667}}
+img{{max-width:100%;display:block}}.caption{{font-size:11px;color:#667}}.img-missing{{min-height:160px;border:1px dashed #ccd6cf;display:grid;place-items:center;text-align:center;color:#667}}
 @media(max-width:720px){{.scene-grid{{grid-template-columns:1fr}}}}
 </style></head><body>
 <h1>Satellite Carbon MRV Verification Report</h1>
@@ -172,6 +263,7 @@ img{{max-width:100%;display:block}}.img-missing{{min-height:160px;border:1px das
 <h2>AOI & coverage</h2><table><tr><th>Requested</th><th>Computed</th><th>Coverage</th><th>Missing</th></tr><tr><td>{result['coverage']['requested_area_ha']:.3f} ha</td><td>{result['coverage']['computed_area_ha']:.3f} ha</td><td>{result['coverage']['coverage_ratio']:.4%}</td><td>{result['coverage']['missing_area_ha']:.3f} ha</td></tr></table>
 <h2>Carbon stock difference</h2><table><tr><th>Metric</th><th>Value</th></tr><tr><td>Start stock</td><td>{stock['start']['total_carbon_t']:.3f} tC</td></tr><tr><td>End stock</td><td>{stock['end']['total_carbon_t']:.3f} tC</td></tr><tr><td>ΔC</td><td>{stock['delta_c_t']:.3f} tC</td></tr><tr><td>E</td><td>{stock['E_tco2e']:.3f} tCO2e</td></tr><tr><td>e</td><td>{stock['e_tco2e_ha_year']:.6f} tCO2e/ha/year</td></tr><tr><td>Model interval L–U</td><td>{unc.get('L')} – {unc.get('U')}</td></tr><tr><td>Potential Q</td><td>{credits.get('Q')} ({html.escape(credits.get('status',''))})</td></tr></table>
 <h2>2019–2024 mean carbon trajectory</h2>{_sparkline(stock.get('yearly', []))}
+<h2>AOI & change-object map</h2>{_map_svg(geometry, events)}
 <h2>Change events</h2><table><thead><tr><th>ID</th><th>Type</th><th>Area ha</th><th>Confidence</th><th>Cause</th><th>Date interval / precision</th><th>E_event</th></tr></thead><tbody>{_event_rows(events)}</tbody></table>
 <h2>Before / after evidence</h2>{gallery}
 <h2>Credits waterfall & price sensitivity</h2><pre>{html.escape(json.dumps(credits, indent=2, ensure_ascii=False))}</pre>
