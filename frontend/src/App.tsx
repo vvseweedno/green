@@ -17,7 +17,7 @@ type EventRecord={
 type AnalysisResult={
   run_id:string;
   coverage:{requested_area_ha:number;computed_area_ha:number;coverage_ratio:number;missing_area_ha:number};
-  stock:{E_tco2e:number;e_tco2e_ha_year:number;yearly:Array<{year:number;mean_carbon_t_ha:number;total_carbon_t:number}>};
+  stock:{E_tco2e:number;e_tco2e_ha_year:number;delta_c_t:number;start:{total_carbon_t:number;mean_carbon_t_ha:number};end:{total_carbon_t:number;mean_carbon_t_ha:number};yearly:Array<{year:number;mean_carbon_t_ha:number;total_carbon_t:number;annual_delta_c_t?:number|null;annual_E_tco2e?:number|null;cumulative_delta_c_t?:number;cumulative_E_tco2e?:number}>};
   uncertainty?:{L:number;U:number;method:string};
   credits:{status:string;reason?:string;R?:number;H?:number;UNC?:number;Radj?:number;buffer?:number;Q?:number};
   baseline?:{Ebase?:number};
@@ -171,6 +171,27 @@ function Metric({label,value,sub}:{label:string;value:string;sub?:string}){
   return <article><b>{label}</b><span>{value}</span>{sub&&<small>{sub}</small>}</article>;
 }
 
+function CarbonTimeline({points,uncertainty}:{points:AnalysisResult['stock']['yearly'];uncertainty?:AnalysisResult['uncertainty']}){
+  if(!points.length)return null;
+  const width=760,height=230,pad=34;
+  const vals=points.map(p=>p.mean_carbon_t_ha);
+  const lo=Math.min(...vals),hi=Math.max(...vals),span=Math.max(hi-lo,1e-9);
+  const xy=points.map((p,i)=>({
+    x:pad+i*(width-2*pad)/Math.max(1,points.length-1),
+    y:height-pad-(p.mean_carbon_t_ha-lo)/span*(height-2*pad),
+    p
+  }));
+  const poly=xy.map(v=>`${v.x.toFixed(1)},${v.y.toFixed(1)}`).join(' ');
+  return <div className="timeline">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="2019 to 2024 mean carbon trajectory">
+      <line x1={pad} y1={height-pad} x2={width-pad} y2={height-pad}/>
+      <polyline points={poly} fill="none" stroke="currentColor" strokeWidth="3"/>
+      {xy.map(({x,y,p})=><g key={p.year}><circle cx={x} cy={y} r="4"/><text x={x} y={height-10} textAnchor="middle">{p.year}</text><text x={x} y={y-10} textAnchor="middle">{p.mean_carbon_t_ha.toFixed(2)}</text></g>)}
+    </svg>
+    <p className="hint">Mean tC/ha by year. Requested-period E interval: {uncertainty?`${uncertainty.L.toFixed(1)} … ${uncertainty.U.toFixed(1)} tCO₂e`:'unavailable'}.</p>
+  </div>;
+}
+
 function SceneImage({runId,path,label,date}:{runId:string;path?:string;label:string;date?:string}){
   if(!path)return <div className="scene-empty"><b>{label}</b><span>No referenced scene</span></div>;
   const src=`${api}/api/v1/analysis/${encodeURIComponent(runId)}/scene-preview?path=${encodeURIComponent(path)}`;
@@ -219,6 +240,8 @@ export default function App(){
   }
 
   const stock=result?.stock,credits=result?.credits,unc=result?.uncertainty;
+  const startPoint=stock?.yearly?.find(p=>p.year===y0);
+  const endPoint=stock?.yearly?.find(p=>p.year===y1);
   const events=result?.events||[];
   const selected=events.find(e=>e.event_id===selectedEventId)||events[0];
   const bestScene=(stage:string)=>selected?.data_quality
@@ -245,8 +268,13 @@ export default function App(){
         <VerifierMap geometry={geometry} events={events} onGeometryDrawn={g=>setGeometryText(JSON.stringify(g,null,2))}/>
         {result&&<>
           <div className="cards">
+            <Metric label={`Mean carbon ${y0}`} value={startPoint?`${startPoint.mean_carbon_t_ha.toFixed(2)} tC/ha`:'unavailable'}/>
+            <Metric label={`Mean carbon ${y1}`} value={endPoint?`${endPoint.mean_carbon_t_ha.toFixed(2)} tC/ha`:'unavailable'}/>
+            <Metric label={`Total stock ${y0}`} value={stock?`${stock.start.total_carbon_t.toFixed(1)} tC`:'unavailable'}/>
+            <Metric label={`Total stock ${y1}`} value={stock?`${stock.end.total_carbon_t.toFixed(1)} tC`:'unavailable'}/>
+            <Metric label="ΔC" value={stock?`${stock.delta_c_t.toFixed(2)} tC`:'unavailable'}/>
             <Metric label="E" value={`${stock?.E_tco2e?.toFixed(2)} tCO₂e`} sub="positive = stock loss"/>
-            <Metric label="e" value={`${stock?.e_tco2e_ha_year?.toFixed(4)} /ha/yr`}/>
+            <Metric label="e" value={`${stock?.e_tco2e_ha_year?.toFixed(4)} tCO₂e/ha/yr`}/>
             <Metric label="Model interval" value={unc?`${unc.L?.toFixed(1)} … ${unc.U?.toFixed(1)}`:'unavailable'} sub={unc?.method}/>
             <Metric label="Potential Q" value={credits?.Q==null?'unavailable':String(credits.Q)} sub={credits?.status}/>
           </div>
@@ -254,7 +282,7 @@ export default function App(){
             <div className="panel"><h2>Coverage</h2><div className="coverage"><strong>{(result.coverage.coverage_ratio*100).toFixed(2)}%</strong><span>{result.coverage.computed_area_ha.toFixed(2)} / {result.coverage.requested_area_ha.toFixed(2)} ha</span></div></div>
             <div className="panel"><h2>Credit waterfall</h2><pre>{JSON.stringify({Ebase:result.baseline?.Ebase,Eproj:stock?.E_tco2e,R:credits?.R,H:credits?.H,UNC:credits?.UNC,Radj:credits?.Radj,buffer:credits?.buffer,Q:credits?.Q,status:credits?.status,reason:credits?.reason},null,2)}</pre></div>
           </div>
-          <div className="panel"><h2>Annual carbon trajectory</h2><table><thead><tr><th>Year</th><th>Mean tC/ha</th><th>Total tC</th></tr></thead><tbody>{stock?.yearly?.map(p=><tr key={p.year}><td>{p.year}</td><td>{p.mean_carbon_t_ha.toFixed(4)}</td><td>{p.total_carbon_t.toFixed(2)}</td></tr>)}</tbody></table></div>
+          <div className="panel"><h2>Annual carbon trajectory</h2><CarbonTimeline points={stock?.yearly||[]} uncertainty={unc}/><table><thead><tr><th>Year</th><th>Mean tC/ha</th><th>Total tC</th><th>Annual ΔC</th><th>Cumulative E</th></tr></thead><tbody>{stock?.yearly?.map(p=><tr key={p.year}><td>{p.year}</td><td>{p.mean_carbon_t_ha.toFixed(4)}</td><td>{p.total_carbon_t.toFixed(2)}</td><td>{p.annual_delta_c_t==null?'—':p.annual_delta_c_t.toFixed(2)}</td><td>{p.cumulative_E_tco2e==null?'—':p.cumulative_E_tco2e.toFixed(2)}</td></tr>)}</tbody></table></div>
           <div className="panel events-panel">
             <div className="panel-title"><h2>Change events</h2><span>{events.length} objects</span></div>
             {events.length===0?<p className="hint">No change objects were emitted for this request, or required optical observations were unavailable.</p>:<>
