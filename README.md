@@ -12,6 +12,7 @@ python -m pip install -e '.[dev]'
 make verify-data
 make test
 make research
+make demo        # changed + control + CHECK_TRANSFER_01 HTML/JSON suite
 make api         # http://localhost:8000
 make frontend    # http://localhost:5173
 make judge
@@ -69,7 +70,7 @@ The official golden example is tested and yields **Q=395**.
 - fixed seed makes runs reproducible;
 - independent / moderate / strong scenarios are visible and comparable.
 
-Outputs are called **model-based quantile intervals under stated assumptions**, not field-calibrated 95% confidence intervals. The 2019→2020 CCI change-SD can be used to diagnose implicit temporal correlation via `uncertainty/temporal.py`.
+Outputs are called **model-based quantile intervals under stated assumptions**, not field-calibrated 95% confidence intervals. The official 2019→2020 CCI Change SD is ingested by `data/cci_change.py` and combined with annual CCI SD to report an implied temporal-correlation diagnostic; it is evidence for sensitivity analysis, not automatic calibration.
 
 ## Change evidence
 
@@ -90,20 +91,30 @@ Transition candidates use robust median/MAD normalization, multi-index agreement
 `scripts/fetch_demo_data.py` queries Element 84 Earth Search `sentinel-2-l2a` by AOI/time, evaluates SCL **inside the AOI**, reads clipped COG windows, applies STAC raster scale/offset metadata, and caches arrays + item metadata + SHA-256 for offline replay.
 
 ```bash
+# force network acquisition and cache
 python scripts/fetch_demo_data.py \
   --geometry path/to/aoi.geojson \
-  --start 2021-06-01 --end 2021-09-30 --count 2
+  --start 2021-06-01 --end 2021-09-30 --count 2 --mode online
+
+# prove the same request can replay with no network
+python scripts/fetch_demo_data.py \
+  --geometry path/to/aoi.geojson \
+  --start 2021-06-01 --end 2021-09-30 --count 2 --mode offline
 ```
+
+`--mode auto` (default) replays a matching request-hash from the checksummed cache first and only uses STAC when no valid cache exists.
 
 ## API
 
 ```text
+GET  /api/v1/areas
 POST /api/v1/analysis
 GET  /api/v1/analysis/{run_id}
 GET  /api/v1/analysis/{run_id}/layers
 GET  /api/v1/analysis/{run_id}/events
 GET  /api/v1/analysis/{run_id}/provenance
 GET  /api/v1/analysis/{run_id}/report
+GET  /api/v1/analysis/{run_id}/scene-preview?path=<referenced-relative-path>
 GET  /health
 ```
 
@@ -147,6 +158,12 @@ flowchart LR
 
 See `research/REPORT.md` and `docs/SCORECARD.md`.
 
+## Demo and judge artifacts
+
+`make demo` generates changed/control/transfer HTML+JSON reports and `runs/demo/manifest.json`. Reports embed referenced Sentinel before/after previews as data URIs, so the evidence remains visible when the HTML file is opened without the API or internet.
+
+`make judge` is stricter: dataset integrity → tests → changed/control/`CHECK_TRANSFER_01` → deterministic double-run hashes → report validation → scorecard print. It exits non-zero on any failed gate.
+
 ## Repository map
 
 - `src/carbon_mrv/carbon/` — stock, baseline, credits, event contribution
@@ -155,7 +172,7 @@ See `research/REPORT.md` and `docs/SCORECARD.md`.
 - `src/carbon_mrv/change/` — indices, composites, transitions, connected objects, fusion
 - `src/carbon_mrv/uncertainty/` — temporal diagnostics and correlated Monte Carlo
 - `src/carbon_mrv/api/` — FastAPI
-- `frontend/` — React/MapLibre verifier UI
+- `frontend/` — React/MapLibre verifier UI with offline map, AOI upload/select, events and before/after imagery
 - `scripts/` — dataset validation, online fetch/cache, reproducibility, preflight
 - `research/` — reproducible experiments
 - `docs/` — methodology, audit trail, jury material and score trace
@@ -166,5 +183,5 @@ See `research/REPORT.md` and `docs/SCORECARD.md`.
 - MODIS 500 m cells are evidence for burn timing/cause, not exact burn geometry.
 - GFC indicates stand-replacement loss, not cause and not AGB amount.
 - Missing/partial required coverage makes credits `unavailable`; it is never silently converted to zero.
-- Scenario price calculations, if added, are scenarios, not market forecasts.
+- Scenario price calculations are illustrative gross-value scenarios, not market forecasts.
 - Q is a **hackathon potential-unit output**, not a certified carbon credit.
