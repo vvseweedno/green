@@ -564,6 +564,12 @@ def analyze_local(
     geom, requested_area = validate_geometry_geojson(request.geometry)
     dataset = LocalDataset(dataset_root)
     official_metadata = load_official_metadata(dataset.root)
+    warnings: list[str] = []
+    if official_metadata.get("missing"):
+        warnings.append(
+            "Missing mandatory metadata: "
+            + ", ".join(official_metadata["missing"])
+        )
     parent_parts = dataset.intersecting_parents(geom)
     if request.parent_aoi_id:
         parent_parts = [
@@ -604,6 +610,14 @@ def analyze_local(
             )
 
     yearly.sort(key=lambda p: p["year"])
+    missing_annual_years = [
+        year for year in range(2019, 2025) if year not in stock_by_year
+    ]
+    if missing_annual_years:
+        warnings.append(
+            "Annual CCI dynamics incomplete; missing years: "
+            + ", ".join(str(year) for year in missing_annual_years)
+        )
     if yearly:
         first_total = float(yearly[0]["total_carbon_t"])
         previous_total = None
@@ -791,7 +805,8 @@ def analyze_local(
             })
         uncertainty["sensitivity"] = sensitivity_rows
 
-    warnings = [cov.reason] if cov.reason else []
+    if cov.reason:
+        warnings.append(cov.reason)
     events, layers = _build_events(
         dataset, parent_parts, request, parent_year_inputs, warnings
     )
