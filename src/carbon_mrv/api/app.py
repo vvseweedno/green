@@ -78,7 +78,7 @@ def create_analysis(request: AnalysisRequest):
     _run_path(run_id).write_text(
         json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
-    write_report(result, RUNS)
+    write_report(result, RUNS, DATASET)
     return result
 
 
