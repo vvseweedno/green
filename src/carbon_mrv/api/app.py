@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from carbon_mrv.analysis.pipeline import analyze_local
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.domain.models import AnalysisRequest
-from carbon_mrv.reporting.imagery import render_prepared_rgb_png
+from carbon_mrv.reporting.imagery import render_prepared_rgb_png, scene_preview_coordinates_wgs84
 from carbon_mrv.reporting.report import write_report
 
 app = FastAPI(title="Carbon MRV API", version="0.1.0")
@@ -122,19 +122,38 @@ def _allowed_preview_paths(result: dict) -> set[str]:
     return allowed
 
 
-@app.get("/api/v1/analysis/{run_id}/scene-preview")
-def scene_preview(run_id: str, path: str = Query(..., min_length=1)):
+def _resolve_allowed_scene(run_id: str, relative_path: str) -> Path:
     result = _load(run_id)
-    if path not in _allowed_preview_paths(result):
+    if relative_path not in _allowed_preview_paths(result):
         raise HTTPException(403, "scene is not referenced by this analysis run")
     root = DATASET.resolve()
-    target = (root / path).resolve()
+    target = (root / relative_path).resolve()
     if not target.is_relative_to(root):
         raise HTTPException(403, "invalid scene path")
     if not target.exists():
         raise HTTPException(404, "scene raster not found")
+    return target
+
+
+@app.get("/api/v1/analysis/{run_id}/scene-preview")
+def scene_preview(run_id: str, path: str = Query(..., min_length=1)):
+    target = _resolve_allowed_scene(run_id, path)
     try:
         payload = render_prepared_rgb_png(target)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, f"preview rendering failed: {exc}") from exc
     return Response(content=payload, media_type="image/png")
+
+
+@app.get("/api/v1/analysis/{run_id}/scene-preview-info")
+def scene_preview_info(run_id: str, path: str = Query(..., min_length=1)):
+    target = _resolve_allowed_scene(run_id, path)
+    try:
+        coordinates = scene_preview_coordinates_wgs84(target)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(422, f"preview georeferencing failed: {exc}") from exc
+    return {
+        "path": path,
+        "coordinates": coordinates,
+        "note": "Visualization overlay only; analysis uses the native raster grid.",
+    }
