@@ -70,11 +70,12 @@ function draftGeoJSON(points:[number,number][]){
   return {type:'Feature',properties:{draft:true},geometry};
 }
 
-function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:EventRecord[];onGeometryDrawn:(g:any)=>void}){
+function VerifierMap({geometry,events,onGeometryDrawn,runId,beforePath,afterPath}:{geometry:any;events:EventRecord[];onGeometryDrawn:(g:any)=>void;runId?:string;beforePath?:string;afterPath?:string}){
   const el=useRef<HTMLDivElement>(null);
   const mapRef=useRef<MLMap|null>(null);
   const [showAoi,setShowAoi]=useState(true),[showEvents,setShowEvents]=useState(true);
   const [showGfc,setShowGfc]=useState(true),[showModis,setShowModis]=useState(true),[showCci,setShowCci]=useState(true);
+  const [showBefore,setShowBefore]=useState(true),[showAfter,setShowAfter]=useState(false);
   const [drawMode,setDrawMode]=useState(false);
   const [drawPoints,setDrawPoints]=useState<[number,number][]>([]);
   const eventsFc=useMemo(()=>({
@@ -147,6 +148,38 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
   },[eventsFc,gfcFc,modisFc,cciFc]);
 
   useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!map.isStyleLoaded())return;
+    let cancelled=false;
+    async function install(id:string,path:string|undefined,visible:boolean){
+      const layerId=`${id}-layer`;
+      if(map.getLayer(layerId))map.removeLayer(layerId);
+      if(map.getSource(id))map.removeSource(id);
+      if(!runId||!path)return;
+      const infoUrl=`${api}/api/v1/analysis/${encodeURIComponent(runId)}/scene-preview-info?path=${encodeURIComponent(path)}`;
+      const imageUrl=`${api}/api/v1/analysis/${encodeURIComponent(runId)}/scene-preview?path=${encodeURIComponent(path)}`;
+      const response=await fetch(infoUrl);
+      if(!response.ok||cancelled)return;
+      const info=await response.json();
+      if(cancelled||!map.isStyleLoaded())return;
+      map.addSource(id,{type:'image',url:imageUrl,coordinates:info.coordinates} as any);
+      map.addLayer({id:layerId,type:'raster',source:id,layout:{visibility:visible?'visible':'none'},paint:{'raster-opacity':0.58}},map.getLayer('aoi-fill')?'aoi-fill':undefined);
+    }
+    void install('sentinel-before',beforePath,showBefore);
+    void install('sentinel-after',afterPath,showAfter);
+    return()=>{cancelled=true;};
+  },[runId,beforePath,afterPath]);
+
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    if(map.getLayer('sentinel-before-layer'))map.setLayoutProperty('sentinel-before-layer','visibility',showBefore?'visible':'none');
+  },[showBefore]);
+  useEffect(()=>{
+    const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
+    if(map.getLayer('sentinel-after-layer'))map.setLayoutProperty('sentinel-after-layer','visibility',showAfter?'visible':'none');
+  },[showAfter]);
+
+  useEffect(()=>{
     const map=mapRef.current;if(!map||!map.isStyleLoaded())return;
     for(const id of ['aoi-fill','aoi-line'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',showAoi?'visible':'none');
   },[showAoi]);
@@ -201,6 +234,8 @@ function VerifierMap({geometry,events,onGeometryDrawn}:{geometry:any;events:Even
   return <div className="map-wrap">
     <div className="map-toolbar">
       <label><input type="checkbox" checked={showAoi} onChange={e=>setShowAoi(e.target.checked)}/> AOI</label>
+      <label><input type="checkbox" checked={showBefore} onChange={e=>setShowBefore(e.target.checked)} disabled={!beforePath}/> Sentinel before</label>
+      <label><input type="checkbox" checked={showAfter} onChange={e=>setShowAfter(e.target.checked)} disabled={!afterPath}/> Sentinel after</label>
       <label><input type="checkbox" checked={showEvents} onChange={e=>setShowEvents(e.target.checked)}/> change objects</label>
       <label><input type="checkbox" checked={showGfc} onChange={e=>setShowGfc(e.target.checked)}/> GFC loss</label>
       <label><input type="checkbox" checked={showModis} onChange={e=>setShowModis(e.target.checked)}/> MODIS fire support</label>
@@ -312,7 +347,7 @@ export default function App(){
         <p className="hint">Q is withheld when full coverage, baseline or finite uncertainty inputs are unavailable. Evidence gaps reduce confidence instead of being inferred.</p>
       </aside>
       <section>
-        <VerifierMap geometry={geometry} events={events} onGeometryDrawn={g=>setGeometryText(JSON.stringify(g,null,2))}/>
+        <VerifierMap geometry={geometry} events={events} runId={result?.run_id} beforePath={before?.reflectance_path} afterPath={after?.reflectance_path} onGeometryDrawn={g=>setGeometryText(JSON.stringify(g,null,2))}/>
         {result&&<>
           <div className="cards">
             <Metric label={`Mean carbon ${y0}`} value={startPoint?`${startPoint.mean_carbon_t_ha.toFixed(2)} tC/ha`:'unavailable'}/>
