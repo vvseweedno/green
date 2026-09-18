@@ -7,6 +7,7 @@ const defaultGeometry={type:'Polygon',coordinates:[[[37.0,55.0],[37.01,55.0],[37
 type Quality={
   stage?:string;date?:string;scene_id?:string;processing_baseline?:string;
   reflectance_path?:string;scl_path?:string;valid_fraction?:number;strict_valid_fraction?:number;
+  supports_post_change?:boolean;used_for_annual_composite?:boolean;reason?:string;
 };
 type CarbonContribution={area_ha?:number;E_event_tco2e?:number;share_of_aoi_area?:number;share_of_absolute_carbon_change_signal?:number};
 type EventRecord={
@@ -329,8 +330,11 @@ export default function App(){
   const bestScene=(stage:string)=>selected?.data_quality
     ?.filter(q=>q.stage===stage&&q.reflectance_path)
     .sort((a,b)=>(b.strict_valid_fraction??b.valid_fraction??0)-(a.strict_valid_fraction??a.valid_fraction??0))[0];
+  const diagnosticAfter=selected?.data_quality
+    ?.filter(q=>q.stage==='diagnostic'&&q.supports_post_change&&q.reflectance_path)
+    .sort((a,b)=>(a.date||'').localeCompare(b.date||''))[0];
   const before=bestScene('before');
-  const after=bestScene('after');
+  const after=diagnosticAfter||bestScene('after');
 
   return <main>
     <header><div><p className="eyebrow">Verification-first MRV</p><h1>Satellite Carbon MRV</h1><p>CCI carbon stock + explainable change evidence + correlated uncertainty + auditable potential-unit calculation.</p></div><div className="badge">2019–2024</div></header>
