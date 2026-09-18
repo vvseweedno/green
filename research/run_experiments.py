@@ -24,19 +24,21 @@ from carbon_mrv.geometry.reproject import reproject_geometry
 OUT = Path("research/results")
 FIG = Path("research/figures")
 
+from plotting import generate_research_figures
+
 
 def _write_csv(path: Path, rows: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
 
 
-def carbon_and_uncertainty(dataset_root: Path) -> tuple[list[dict], list[dict], list[dict]]:
+def carbon_and_uncertainty(dataset_root: Path) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     ds = LocalDataset(dataset_root)
     parents = {p.aoi_id: p for p in ds.parent_aois()}
     sites = [x for x in ("RU_MORDOVIA_03", "RU_TVER_01", "RU_MORDOVIA_04") if x in parents]
     if "RU_MORDOVIA_03" not in sites or "RU_TVER_01" not in sites:
         raise RuntimeError("Research requires RU_MORDOVIA_03 and RU_TVER_01 in areas.geojson")
-    summaries, sensitivity, baseline_sensitivity = [], [], []
+    summaries, sensitivity, baseline_sensitivity, carbon_series = [], [], [], []
     for site in sites:
         geom = parents[site].geometry
         for scenario in ("independent", "moderate", "strong"):
@@ -58,6 +60,13 @@ def carbon_and_uncertainty(dataset_root: Path) -> tuple[list[dict], list[dict], 
             sensitivity.append(row)
             if scenario == "moderate":
                 summaries.append(row)
+                for point in res["stock"].get("yearly", []):
+                    carbon_series.append({
+                        "aoi_id": site,
+                        "year": point["year"],
+                        "mean_carbon_t_ha": point["mean_carbon_t_ha"],
+                        "total_carbon_t": point["total_carbon_t"],
+                    })
                 u = res.get("uncertainty") or {}
                 L, U = u.get("L"), u.get("U")
                 if L is not None and U is not None:
@@ -71,7 +80,7 @@ def carbon_and_uncertainty(dataset_root: Path) -> tuple[list[dict], list[dict], 
                         baseline_sensitivity.append({
                             "aoi_id": site, "baseline_scenario": name, "Ebase": ebase, "Q": c.Q, "R": c.R
                         })
-    return summaries, sensitivity, baseline_sensitivity
+    return summaries, sensitivity, baseline_sensitivity, carbon_series
 
 
 def _load_observations(dataset_root: Path, aoi_id: str, year: int, geometry, months={6, 7, 8}):
@@ -241,8 +250,9 @@ def main():
         raise SystemExit("Dataset unavailable: research refuses to fabricate results")
     OUT.mkdir(parents=True, exist_ok=True)
     FIG.mkdir(parents=True, exist_ok=True)
-    summaries, uncertainty, baseline = carbon_and_uncertainty(root)
+    summaries, uncertainty, baseline, carbon_series = carbon_and_uncertainty(root)
     _write_csv(OUT / "site_summary.csv", summaries)
+    _write_csv(OUT / "carbon_series.csv", carbon_series)
     _write_csv(OUT / "uncertainty_sensitivity.csv", uncertainty)
     _write_csv(OUT / "baseline_sensitivity.csv", baseline)
     _write_csv(
@@ -252,12 +262,27 @@ def main():
     try:
         changes = change_method_comparison(root)
         thresholds = threshold_sensitivity(root)
+        temporal = temporal_dependence_diagnostics(root)
         _write_csv(OUT / "change_method_comparison.csv", changes)
         _write_csv(OUT / "change_threshold_sensitivity.csv", thresholds)
+        _write_csv(OUT / "temporal_rho_diagnostic.csv", temporal)
+        generate_research_figures(
+            carbon_series=carbon_series,
+            uncertainty=uncertainty,
+            baseline=baseline,
+            changes=changes,
+            thresholds=thresholds,
+            temporal=temporal,
+            output_dir=FIG,
+        )
     except Exception as exc:
         (OUT / "change_experiment_error.txt").write_text(str(exc), encoding="utf-8")
         raise
-    print(json.dumps({"ok": True, "results": [str(p) for p in OUT.glob("*")]}, indent=2))
+    print(json.dumps({
+        "ok": True,
+        "results": [str(p) for p in sorted(OUT.glob("*"))],
+        "figures": [str(p) for p in sorted(FIG.glob("*.png"))],
+    }, indent=2))
 
 
 if __name__ == "__main__":
