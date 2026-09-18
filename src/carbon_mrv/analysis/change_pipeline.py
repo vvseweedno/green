@@ -21,6 +21,7 @@ class SceneObservation:
     scl: np.ndarray
     transform: object
     crs: str = "EPSG:4326"
+    metadata: dict | None = None
 
 
 def annual_from_scenes(scenes: list[SceneObservation]):
@@ -37,7 +38,18 @@ def annual_from_scenes(scenes: list[SceneObservation]):
         mask = scl_valid_mask(scene.scl, allow_low_confidence=True)
         index_scenes.append(scene_indices(scene.bands))
         masks.append(mask)
-        quality.append({"date": scene.observed_on.isoformat(), **scl_quality_summary(scene.scl)})
+        meta = scene.metadata or {}
+        quality.append({
+            "date": scene.observed_on.isoformat(),
+            **scl_quality_summary(scene.scl),
+            "scene_id": meta.get("scene_id") or meta.get("item_id") or meta.get("id"),
+            "processing_baseline": meta.get("processing_baseline")
+            or meta.get("s2:processing_baseline")
+            or meta.get("processing:version"),
+            "radiometry": meta.get("radiometry")
+            or meta.get("scale_offset")
+            or meta.get("bands"),
+        })
     return robust_annual_composite(index_scenes, masks), quality
 
 
