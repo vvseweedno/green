@@ -17,6 +17,7 @@ from carbon_mrv.carbon.contribution import event_emission_contribution
 from carbon_mrv.carbon.credits import calculate_potential_credits
 from carbon_mrv.carbon.stock import (
     CF,
+    CO2_PER_C,
     StockEstimate,
     annualized_emission_intensity,
     stock_difference_emission_tco2e,
@@ -441,7 +442,10 @@ def analyze_local(
                 "reason": str(exc),
             })
 
-    u_parts = []
+    uncertainty_scenarios = ("independent", "moderate", "strong")
+    scenario_parts: dict[str, list[tuple[str, Any]]] = {
+        name: [] for name in uncertainty_scenarios
+    }
     for parent, part_geom in parent_parts:
         key0 = (parent.aoi_id, request.year_start)
         key1 = (parent.aoi_id, request.year_end)
@@ -455,24 +459,35 @@ def analyze_local(
         ):
             continue
         weights = area_weight_grid(c0, part_geom)
-        try:
-            u = run_scenario(
-                request.uncertainty_scenario,
-                agb0=c0.agb,
-                agb1=c1.agb,
-                sd0=c0.sd,
-                sd1=c1.sd,
-                area_ha=weights,
-                simulations=simulations,
-                seed=seed,
-            )
-            u_parts.append((parent.aoi_id, u))
-        except ValueError:
-            continue
+        for scenario_name in uncertainty_scenarios:
+            try:
+                u = run_scenario(
+                    scenario_name,
+                    agb0=c0.agb,
+                    agb1=c1.agb,
+                    sd0=c0.sd,
+                    sd1=c1.sd,
+                    area_ha=weights,
+                    simulations=simulations,
+                    seed=seed,
+                )
+                scenario_parts[scenario_name].append((parent.aoi_id, u))
+            except ValueError:
+                continue
 
-    if u_parts:
-        lower = sum(u.lower_tco2e for _, u in u_parts)
-        upper = sum(u.upper_tco2e for _, u in u_parts)
+    scenario_bounds: dict[str, tuple[float, float]] = {}
+    for scenario_name, parts in scenario_parts.items():
+        if len(parts) != len(parent_parts):
+            continue
+        scenario_bounds[scenario_name] = (
+            sum(u.lower_tco2e for _, u in parts),
+            sum(u.upper_tco2e for _, u in parts),
+        )
+
+    selected_parts = scenario_parts.get(request.uncertainty_scenario, [])
+    selected_bounds = scenario_bounds.get(request.uncertainty_scenario)
+    if selected_bounds is not None:
+        lower, upper = selected_bounds
         uncertainty = {
             "L": lower,
             "U": upper,
@@ -483,7 +498,7 @@ def analyze_local(
                 "seed": seed,
                 "cross_parent_aggregation": "conservative bound summation",
                 "parts": [
-                    {"aoi_id": aoi, **asdict(u)} for aoi, u in u_parts
+                    {"aoi_id": aoi, **asdict(u)} for aoi, u in selected_parts
                 ],
                 "temporal_diagnostic_2019_2020": temporal_diagnostics,
             },
@@ -535,6 +550,42 @@ def analyze_local(
     credits["price_scenario_disclaimer"] = (
         "Illustrative gross-value scenarios only; not a market-price forecast."
     )
+
+    if uncertainty is not None:
+        sensitivity_rows = []
+        for scenario_name in uncertainty_scenarios:
+            bounds = scenario_bounds.get(scenario_name)
+            if bounds is None:
+                sensitivity_rows.append({
+                    "scenario": scenario_name,
+                    "status": "unavailable",
+                    "reason": "incomplete_uncertainty_inputs",
+                })
+                continue
+            scenario_lower, scenario_upper = bounds
+            scenario_credits = calculate_potential_credits(
+                area_ha=computed_area,
+                year_start=request.year_start,
+                year_end=request.year_end,
+                Ebase=Ebase,
+                Eproj=E,
+                lower=scenario_lower,
+                upper=scenario_upper,
+                full_coverage=cov.reason is None,
+                baseline_available=baseline_available,
+            )
+            sensitivity_rows.append({
+                "scenario": scenario_name,
+                "status": scenario_credits.status,
+                "L": scenario_lower,
+                "U": scenario_upper,
+                "interval_width_tco2e": scenario_upper - scenario_lower,
+                "H": scenario_credits.H,
+                "H_over_R": scenario_credits.H_over_R,
+                "UNC": scenario_credits.UNC,
+                "Q": scenario_credits.Q,
+            })
+        uncertainty["sensitivity"] = sensitivity_rows
 
     warnings = [cov.reason] if cov.reason else []
     events, layers = _build_events(
