@@ -51,6 +51,9 @@ def annual_from_scenes(scenes: list[SceneObservation]):
             or meta.get("bands"),
             "reflectance_path": meta.get("reflectance_path"),
             "scl_path": meta.get("scl_path"),
+            "acquisition_mode": meta.get("acquisition_mode", "local_prepared"),
+            "artifact_sha256": meta.get("artifact_sha256") or meta.get("sha256"),
+            "source_assets": meta.get("source_assets"),
         })
     return robust_annual_composite(index_scenes, masks), quality
 
