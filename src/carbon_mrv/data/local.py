@@ -45,11 +45,16 @@ class LocalDataset:
         return out
 
     def intersecting_parents(self, geometry) -> list[tuple[ParentAOI, object]]:
+        # Deterministic disjoint partition: overlapping parent footprints can never double-count area.
         parts = []
-        for parent in self.parent_aois():
+        covered = None
+        for parent in sorted(self.parent_aois(), key=lambda p: p.aoi_id):
             inter = parent.geometry.intersection(geometry)
+            if covered is not None and not covered.is_empty:
+                inter = inter.difference(covered)
             if not inter.is_empty and inter.area > 0:
                 parts.append((parent, inter))
+                covered = inter if covered is None else covered.union(inter)
         return parts
 
     def cci_path(self, aoi_id: str, year: int) -> Path | None:
