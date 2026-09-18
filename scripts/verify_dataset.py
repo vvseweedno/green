@@ -92,6 +92,13 @@ def main() -> int:
         if missing_baseline:
             errors.append(f"baseline.csv missing parent AOIs: {missing_baseline}")
         evidence["baseline_aois"] = sorted(baselines)
+        baseline_consistency = dataset.baseline_consistency_report()
+        evidence["baseline_formula_consistency"] = baseline_consistency
+        if baseline_consistency["mismatch_count"] > 0:
+            errors.append(
+                "baseline.csv disagrees with mandated formula: "
+                f"{baseline_consistency['mismatch_count']} value(s)"
+            )
     except Exception as exc:
         errors.append(f"baseline.csv invalid: {exc}")
 
