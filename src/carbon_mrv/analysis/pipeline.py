@@ -827,6 +827,7 @@ def analyze_local(
             "Ebase": Ebase,
             "parent_parts": baseline_proof,
             "available": baseline_available,
+            "consistency": dataset.baseline_consistency_report(),
         },
         "credits": credits,
         "provenance": {
