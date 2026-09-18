@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -121,4 +123,91 @@ def compact_metadata_provenance(bundle: dict[str, Any]) -> dict[str, Any]:
         "reference_event_count": len(bundle.get("reference_events", [])),
         "reference_events": bundle.get("reference_events", []),
         "roles": bundle.get("roles", {}),
+    }
+
+
+
+def _normalize_parameter_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _numeric_parameter(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", ".")
+    if not text:
+        return None
+    percent = "%" in text
+    ratio = re.fullmatch(r"\s*([-+]?\d+(?:\.\d+)?)\s*/\s*([-+]?\d+(?:\.\d+)?)\s*", text)
+    if ratio:
+        denominator = float(ratio.group(2))
+        if denominator == 0:
+            return None
+        return float(ratio.group(1)) / denominator
+    match = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text)
+    if not match:
+        return None
+    number = float(match.group(0))
+    return number / 100.0 if percent else number
+
+
+def methodology_parameter_consistency(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Check only recognized case constants; preserve unknown parameters without guessing."""
+    expected = {
+        "carbon_fraction": (0.47, {
+            "cf", "carbon_fraction", "biomass_carbon_fraction",
+        }),
+        "co2_per_c": (44.0 / 12.0, {
+            "co2_per_c", "co2_c_ratio", "co2_to_c", "co2_carbon_ratio",
+        }),
+        "leakage": (0.0, {
+            "lk", "leakage", "leakage_tco2e",
+        }),
+        "buffer_fraction": (0.15, {
+            "buffer", "buffer_fraction", "buffer_rate", "reserve_fraction",
+        }),
+        "uncertainty_free_band": (0.10, {
+            "uncertainty_free_band", "uncertainty_threshold",
+            "unc_free_threshold", "free_uncertainty_threshold",
+        }),
+    }
+    normalized = {
+        _normalize_parameter_name(str(key)): (str(key), value)
+        for key, value in parameters.items()
+    }
+    checks = []
+    matched_keys: set[str] = set()
+    for semantic_name, (expected_value, aliases) in expected.items():
+        for alias in aliases:
+            if alias not in normalized:
+                continue
+            original_key, raw = normalized[alias]
+            numeric = _numeric_parameter(raw)
+            ok = numeric is not None and math.isclose(
+                numeric, expected_value, rel_tol=1e-9, abs_tol=1e-12
+            )
+            checks.append({
+                "semantic_name": semantic_name,
+                "parameter_key": original_key,
+                "raw_value": raw,
+                "numeric_value": numeric,
+                "expected": expected_value,
+                "ok": ok,
+            })
+            matched_keys.add(original_key)
+            break
+    mismatches = [check for check in checks if not check["ok"]]
+    return {
+        "recognized_checks": checks,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+        "uninterpreted_keys": [
+            key for key in parameters if key not in matched_keys
+        ],
+        "policy": (
+            "Only recognized official case constants are compared. Unknown keys are "
+            "preserved for provenance and never silently mapped to formulas."
+        ),
     }
