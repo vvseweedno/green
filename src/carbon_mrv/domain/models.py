@@ -13,7 +13,7 @@ class AnalysisRequest(BaseModel):
     year_end: int = Field(ge=2019, le=2024)
     data_mode: Literal["auto", "offline", "online"] = "auto"
     parent_aoi_id: str | None = None
-    uncertainty_scenario: str = "moderate"
+    uncertainty_scenario: Literal["independent", "moderate", "strong"] = "moderate"
 
     @model_validator(mode="after")
     def _years(self) -> "AnalysisRequest":
@@ -27,7 +27,7 @@ class CoverageResult(BaseModel):
     computed_area_ha: float
     coverage_ratio: float
     missing_area_ha: float
-    reasons: list[str] = []
+    reason: str | None = None
 
 
 class StockPoint(BaseModel):
@@ -35,14 +35,18 @@ class StockPoint(BaseModel):
     area_ha: float
     total_carbon_t: float
     mean_carbon_t_ha: float
+    annual_delta_c_t: float | None = None
+    annual_E_tco2e: float | None = None
+    cumulative_delta_c_t: float = 0.0
+    cumulative_E_tco2e: float = 0.0
 
 
 class UncertaintyPayload(BaseModel):
-    lower_tco2e: float
-    upper_tco2e: float
+    L: float
+    U: float
     method: str
     assumptions: dict[str, Any]
-    sensitivity: list[dict[str, Any]] = []
+    sensitivity: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreditsPayload(BaseModel):
@@ -55,6 +59,8 @@ class CreditsPayload(BaseModel):
     Radj: float | None = None
     buffer: float | None = None
     Q: int | None = None
+    scenario_values_rub: list[dict[str, Any]] = Field(default_factory=list)
+    price_scenario_disclaimer: str | None = None
 
 
 class AnalysisResult(BaseModel):
@@ -65,9 +71,10 @@ class AnalysisResult(BaseModel):
     coverage: CoverageResult
     stock: dict[str, Any]
     uncertainty: UncertaintyPayload | None = None
-    events: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    layers: list[dict[str, Any]] = Field(default_factory=list)
     baseline: dict[str, Any] | None = None
     credits: CreditsPayload
-    provenance: dict[str, Any] = {}
-    limitations: list[str] = []
-    warnings: list[str] = []
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
