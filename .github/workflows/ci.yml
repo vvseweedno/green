@@ -28,4 +28,8 @@ jobs:
         with:
           node-version: "22"
       - run: npm install
+      - run: |
+          echo "PACKAGE_LOCK_BEGIN"
+          cat package-lock.json
+          echo "PACKAGE_LOCK_END"
       - run: npm run build
