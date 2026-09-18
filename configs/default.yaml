@@ -1,0 +1,17 @@
+project:
+  name: carbon-mrv
+  carbon_fraction: 0.47
+  co2_per_c: 3.6666666666666665
+analysis:
+  year_min: 2019
+  year_max: 2024
+  max_aoi_ha: 2000
+  full_coverage_required_for_credits: true
+sentinel2:
+  stac_url: https://earth-search.aws.element84.com/v1
+  collection: sentinel-2-l2a
+  summer_months: [6, 7, 8]
+  assess_top_tile_cloud_candidates: 12
+provenance:
+  checksum: sha256
+  save_stac_item_json: true

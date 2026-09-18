@@ -1,0 +1,11 @@
+scl:
+  invalid: [0, 1, 2, 3, 8, 9, 10, 11]
+  water: 6
+  low_confidence: [7]
+change:
+  default_method: multi_index_robust
+  z_threshold: 2.5
+  min_index_agreement: 2
+  min_connected_area_ha: 0.25
+  thresholds_are_research_tunable: true
+  circular_evaluation_guard: "GFC/MODIS are external evidence and are not detector inputs when used for agreement evaluation"
