@@ -24,6 +24,7 @@ from carbon_mrv.carbon.stock import (
 )
 from carbon_mrv.change.fusion import Evidence
 from carbon_mrv.data.cci import area_weight_grid, exact_weight_vectors, read_cci_clip
+from carbon_mrv.data.cci_change import temporal_rho_from_official_change
 from carbon_mrv.data.external_evidence import gfc_event_evidence, modis_fire_evidence
 from carbon_mrv.data.local import LocalDataset
 from carbon_mrv.data.metadata import compact_metadata_provenance, load_official_metadata
@@ -409,6 +410,21 @@ def analyze_local(
         E, computed_area, request.year_start, request.year_end
     )
 
+    temporal_diagnostics = []
+    for parent, part_geom in parent_parts:
+        try:
+            diagnostic = temporal_rho_from_official_change(
+                dataset.root, parent.aoi_id, part_geom
+            )
+            if diagnostic is not None:
+                temporal_diagnostics.append({"aoi_id": parent.aoi_id, **diagnostic})
+        except ValueError as exc:
+            temporal_diagnostics.append({
+                "aoi_id": parent.aoi_id,
+                "status": "unavailable",
+                "reason": str(exc),
+            })
+
     u_parts = []
     for parent, part_geom in parent_parts:
         key0 = (parent.aoi_id, request.year_start)
@@ -453,6 +469,7 @@ def analyze_local(
                 "parts": [
                     {"aoi_id": aoi, **asdict(u)} for aoi, u in u_parts
                 ],
+                "temporal_diagnostic_2019_2020": temporal_diagnostics,
             },
             "sensitivity": [],
         }
