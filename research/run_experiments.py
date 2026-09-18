@@ -66,6 +66,10 @@ def carbon_and_uncertainty(dataset_root: Path) -> tuple[list[dict], list[dict], 
                         "year": point["year"],
                         "mean_carbon_t_ha": point["mean_carbon_t_ha"],
                         "total_carbon_t": point["total_carbon_t"],
+                        "annual_delta_c_t": point.get("annual_delta_c_t"),
+                        "annual_E_tco2e": point.get("annual_E_tco2e"),
+                        "cumulative_delta_c_t": point.get("cumulative_delta_c_t"),
+                        "cumulative_E_tco2e": point.get("cumulative_E_tco2e"),
                     })
                 u = res.get("uncertainty") or {}
                 L, U = u.get("L"), u.get("U")
@@ -255,10 +259,6 @@ def main():
     _write_csv(OUT / "carbon_series.csv", carbon_series)
     _write_csv(OUT / "uncertainty_sensitivity.csv", uncertainty)
     _write_csv(OUT / "baseline_sensitivity.csv", baseline)
-    _write_csv(
-        OUT / "temporal_rho_diagnostic.csv",
-        temporal_dependence_diagnostics(root),
-    )
     try:
         changes = change_method_comparison(root)
         thresholds = threshold_sensitivity(root)
