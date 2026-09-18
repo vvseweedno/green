@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from carbon_mrv.analysis.pipeline import analyze_local
 from carbon_mrv.domain.models import AnalysisRequest
@@ -20,7 +22,8 @@ def main():
     if args.cmd == "analyze":
         req = AnalysisRequest.model_validate_json(Path(args.request).read_text(encoding="utf-8"))
         result = analyze_local(req, args.dataset)
-        result["run_id"] = result.get("run_id") or Path(args.request).stem
+        result["run_id"] = str(uuid4())
+        result["created_at_utc"] = datetime.now(timezone.utc).isoformat()
         html_path, json_path = write_report(result, args.runs)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         print(f"report={html_path} json={json_path}")
