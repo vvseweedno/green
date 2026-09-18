@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.features import shapes
 from rasterio.mask import mask
-from shapely.geometry import mapping
+from shapely.geometry import mapping, shape
+from shapely.ops import unary_union
 
 from carbon_mrv.data.modis import valid_burn_mask
 from carbon_mrv.geometry.reproject import reproject_geometry
@@ -34,19 +36,41 @@ def find_raster(root: str | Path, aoi_id: str, *keywords: str, year: int | None 
 
 
 def read_masked_band(path: str | Path, geometry_wgs84, band: int = 1) -> np.ndarray:
+    arr, _, _ = read_masked_band_with_grid(path, geometry_wgs84, band)
+    return arr
+
+
+def read_masked_band_with_grid(path: str | Path, geometry_wgs84, band: int = 1):
     with rasterio.open(path) as src:
         if src.crs is None:
             raise ValueError(f"Raster has no CRS: {path}")
         geom = reproject_geometry(geometry_wgs84, "EPSG:4326", src.crs)
-        arr, _ = mask(src, [mapping(geom)], crop=True, filled=False, indexes=band)
-        return np.asarray(arr.filled(np.nan), dtype=float)
+        arr, transform = mask(src, [mapping(geom)], crop=True, filled=False, indexes=band)
+        return np.asarray(arr.filled(np.nan), dtype=float), transform, src.crs
+
+
+def _support_geometry_wgs84(binary: np.ndarray, transform, crs):
+    geoms = [
+        shape(geom)
+        for geom, value in shapes(
+            np.asarray(binary, dtype=np.uint8),
+            mask=np.asarray(binary, dtype=bool),
+            transform=transform,
+        )
+        if int(value) == 1
+    ]
+    if not geoms:
+        return None
+    merged = unary_union(geoms)
+    wgs84 = reproject_geometry(merged, crs, "EPSG:4326")
+    return wgs84.__geo_interface__
 
 
 def gfc_event_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, loss_year: int) -> dict | None:
     path = find_raster(dataset_root, aoi_id, "lossyear")
     if path is None:
         return None
-    arr = read_masked_band(path, geometry_wgs84)
+    arr, transform, crs = read_masked_band_with_grid(path, geometry_wgs84)
     code = loss_year - 2000
     finite = np.isfinite(arr)
     matching = finite & (arr == code)
@@ -60,18 +84,31 @@ def gfc_event_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, lo
         "date_max": date(loss_year, 12, 31),
         "path": str(path),
         "matching_pixels": int(np.sum(matching)),
+        "footprint_geometry_wgs84": _support_geometry_wgs84(
+            matching, transform, crs
+        ),
+        "footprint_kind": "GFC loss-pixel support",
     }
 
 
-def _read_aligned_crop(reference_path: Path, other_path: Path, geometry_wgs84, *, fill: int = 0):
+def _read_aligned_crop_with_grid(
+    reference_path: Path, other_path: Path, geometry_wgs84, *, fill: int = 0
+):
     with rasterio.open(reference_path) as ref, rasterio.open(other_path) as src:
         if ref.crs is None or src.crs is None:
             raise ValueError("MODIS evidence raster missing CRS")
         if str(ref.crs) != str(src.crs) or ref.transform != src.transform or ref.shape != src.shape:
             raise ValueError("MODIS evidence grids are not aligned")
         geom = reproject_geometry(geometry_wgs84, "EPSG:4326", ref.crs)
-        arr, _ = mask(src, [mapping(geom)], crop=True, filled=False, indexes=1)
-        return np.asarray(arr.filled(fill))
+        arr, transform = mask(src, [mapping(geom)], crop=True, filled=False, indexes=1)
+        return np.asarray(arr.filled(fill)), transform, ref.crs
+
+
+def _read_aligned_crop(reference_path: Path, other_path: Path, geometry_wgs84, *, fill: int = 0):
+    arr, _, _ = _read_aligned_crop_with_grid(
+        reference_path, other_path, geometry_wgs84, fill=fill
+    )
+    return arr
 
 
 def _open_aligned_pair(burn_path: Path, qa_path: Path, geometry_wgs84):
@@ -102,7 +139,13 @@ def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, y
     if burn_path is None or qa_path is None:
         return None
     try:
-        burn, qa = _open_aligned_pair(burn_path, qa_path, geometry_wgs84)
+        burn, burn_transform, burn_crs = _read_aligned_crop_with_grid(
+            burn_path, burn_path, geometry_wgs84, fill=0
+        )
+        qa = _read_aligned_crop(
+            burn_path, qa_path, geometry_wgs84, fill=0
+        ).astype(np.uint8)
+        burn = np.asarray(burn, dtype=np.int16)
     except ValueError:
         return None
     valid = valid_burn_mask(burn, qa)
@@ -160,4 +203,8 @@ def modis_fire_evidence(dataset_root: str | Path, aoi_id: str, geometry_wgs84, y
         "uncertainty_days_max": int(np.max(pads)) if pads.size else 0,
         "first_day_constraint_used": first is not None,
         "last_day_constraint_used": last is not None,
+        "footprint_geometry_wgs84": _support_geometry_wgs84(
+            valid, burn_transform, burn_crs
+        ) if np.any(valid) else None,
+        "footprint_kind": "coarse MCD64A1 cell support; not exact burn perimeter",
     }
